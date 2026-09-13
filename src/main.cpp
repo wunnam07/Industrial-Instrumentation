@@ -18,14 +18,16 @@ int potValue = 0;
 
 unsigned long lastSampleTime = 0;
 const unsigned long SAMPLE_INTERVAL = 1000;
+
 void setup() {
     Serial.begin(115200);
     delay(1000);
 
     sensor1.begin();
     sensor2.begin();
-    pinMode(LED_PIN, OUTPUT);
     
+    sensor1.setWaitForConversion(false);
+    sensor2.setWaitForConversion(false);
 
     Serial.println("DS18B20 Sensor 1&2 test");
 }
@@ -36,7 +38,7 @@ void loop() {
 
     if (currentTime - lastSampleTime >= SAMPLE_INTERVAL) {
         lastSampleTime = currentTime;
-    }
+    
         sensor1.requestTemperatures();
         sensor2.requestTemperatures();  
 
@@ -66,4 +68,5 @@ void loop() {
         potValue = analogRead(POT_PIN);
         Serial.print("Potentiometer raw ADC:");
         Serial.println(potValue);
+    }
 }

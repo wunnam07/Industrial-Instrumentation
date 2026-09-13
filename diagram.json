@@ -1,0 +1,84 @@
+{
+    "version": 1,
+    "author": "wunnam",
+    "editor": "wokwi",
+    "parts": [
+        {
+            "type": "board-esp32-devkit-c-v4",
+            "id": "esp",
+            "top": 0,
+            "left": 0,
+            "attrs": {}
+        },
+        {
+            "type": "wokwi-ds18b20",
+            "id": "temp1",
+            "top": 20,
+            "left": 220,
+            "attrs": {}
+        },
+        {
+            "type": "wokwi-ds18b20",
+            "id": "temp2",
+            "top": 20,
+            "left": 320,
+            "attrs": {}
+        },
+        {
+            "type": "wokwi-resistor",
+            "id": "r1",
+            "top": -40,
+            "left": 160,
+            "attrs": {
+                "resistance": "4700"
+            }
+        },
+        {
+            "type": "wokwi-resistor",
+            "id": "r2",
+            "top": -40,
+            "left": 260,
+            "attrs": {
+                "resistance": "4700"
+            }
+        },
+        {
+            "type": "wokwi-potentiometer",
+            "id": "pot1",
+            "top": 0,
+            "left": -400,
+            "attrs": {}
+        },
+        {
+            "type": "wokwi-led",
+            "id": "led1",
+            "top": 0,
+            "left": -100,
+            "attrs": {
+                "color": "red"
+            }
+        }
+    ],
+    "connections": [
+        ["esp:TX", "$serialMonitor:RX", "", []],
+        ["esp:RX", "$serialMonitor:TX", "", []],
+        ["temp1:VCC", "esp:3V3", "red", []],
+        ["temp1:GND", "esp:GND.1", "black", []],
+        ["temp1:DQ", "esp:18", "green", []],
+        ["r1:1", "temp1:DQ", "red", []],
+        ["r1:2", "temp1:VCC", "green", []],
+        ["temp2:VCC", "esp:3V3", "red", []],
+        ["temp2:GND", "esp:GND.1", "black", []],
+        ["temp2:DQ", "esp:19", "green", []],
+        ["r2:1", "temp2:DQ", "red", []],
+        ["r2:2", "temp2:VCC", "green", []],
+        ["pot1:SIG", "esp:34", "green", []],
+        ["pot1:GND", "esp:GND.1", "black", []],
+        ["pot1:VCC", "esp:3V3", "red", []],
+        ["led1:A", "esp:23", "green", []],
+        ["led1:C", "esp:GND.1", "black", []]
+    ],
+    "serialMonitor": {
+        "display": "always"
+    }
+}

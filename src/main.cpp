@@ -19,6 +19,10 @@ int potValue = 0;
 unsigned long lastSampleTime = 0;
 const unsigned long SAMPLE_INTERVAL = 1000;
 
+float temperature1 = 0.0;
+float temperature2 = 0.0;
+int potValue = 0;
+
 void setup() {
     Serial.begin(115200);
     delay(1000);
@@ -32,41 +36,48 @@ void setup() {
     Serial.println("DS18B20 Sensor 1&2 test");
 }
 
+void readInput() {
+    sensor1.requestTemperatures();
+    sensor2.requestTemperatures();  
+
+    temperature1 = sensor1.getTempCByIndex(0);
+    temperature2 = sensor2.getTempCByIndex(0);
+
+    potValue = analogRead(POT_PIN);
+}
+
+
+void logMeasurements(unsigned long timestamp) {
+    Serial.print("[");
+    Serial.print(timestamp);
+    Serial.print(" ms] ");
+    Serial.print("Temperature 1:");
+    Serial.print(temperature1);
+    Serial.println(" C");
+
+    Serial.print("[");
+    Serial.print(timestamp);
+    Serial.print(" ms] ");
+    Serial.print("Temperature 2:");
+    Serial.print(temperature2);
+    Serial.println(" C");
+
+    Serial.print("[");
+    Serial.print(timestamp);
+    Serial.print(" ms] ");
+    Serial.print("Potentiometer raw ADC:");
+    Serial.println(potValue);
+}
+
 void loop() {
     unsigned long timestamp= millis();
     unsigned long currentTime = millis();
 
     if (currentTime - lastSampleTime >= SAMPLE_INTERVAL) {
         lastSampleTime = currentTime;
-    
-        sensor1.requestTemperatures();
-        sensor2.requestTemperatures();  
-
-        float temperature1 = 
-    sensor1.getTempCByIndex(0);
-        float temperature2 = 
-    sensor2.getTempCByIndex(0);
-
         
-        Serial.print("[");
-        Serial.print(timestamp);
-        Serial.print(" ms] ");
-        Serial.print("Temperature 1:");
-        Serial.print(temperature1);
-        Serial.println(" C");
+        readInput();
 
-        Serial.print("[");
-        Serial.print(timestamp);
-        Serial.print(" ms] ");
-        Serial.print("Temperature 2:");
-        Serial.print(temperature2);
-        Serial.println(" C");
-
-        Serial.print("[");
-        Serial.print(timestamp);
-        Serial.print(" ms] ");
-        potValue = analogRead(POT_PIN);
-        Serial.print("Potentiometer raw ADC:");
-        Serial.println(potValue);
+        logMeasurements(timestamp);
     }
 }

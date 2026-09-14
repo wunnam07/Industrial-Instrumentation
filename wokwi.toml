@@ -4,3 +4,7 @@ firmware = '.pio/build/esp32dev/firmware.bin'
 elf='.pio/build/esp32dev/firmware.elf'
 
 rfc2217ServerPort = 4000
+
+[[net.forward]]
+from = "localhost:1502"
+to = "target:502"

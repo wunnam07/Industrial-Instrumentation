@@ -25,6 +25,9 @@ const uint16_t DI_PLC_COMMS_OK       = 7;
 
 const uint16_t COIL_HEATER_CMD = 0;
 const uint16_t HR_PLC_HEARTBEAT = 0;
+const uint16_t HR_FAULT_MODE = 1;
+
+const uint16_t MODBUS_INVALID_VALUE = 65535;
 
 const int TEMP1_PIN = 18;
 const int TEMP2_PIN = 19;
@@ -44,6 +47,8 @@ DallasTemperature sensor2(&oneWire2);
 
 int potValue = 0;
 float scaled_ADC = 0.0;
+float acquiredTemperature1 = 0.0;
+float acquiredTemperature2 = 0.0;
 float temperature1 = 0.0;
 float temperature2 = 0.0;
 float filteredPotValue = 0.0;
@@ -107,8 +112,31 @@ uint16_t lastPLCHeartbeat = 0;
 unsigned long lastPLCHeartbeatTime = 0;
 const unsigned long PLC_COMMS_TIMEOUT = 3000;
 
-bool driftTestEnabled = false;
-float driftOffset = 0.0;
+enum FaultMode : uint16_t {
+    NONE = 0,
+    SENSOR1_DISCONNECTED = 1,
+    SENSOR2_DISCONNECTED = 2,
+    BOTH_SENSORS_DISCONNECTED = 3,
+    SENSOR1_BIAS = 4,
+    SENSOR2_BIAS = 5,
+    SENSOR1_STUCK = 6,
+    SENSOR2_STUCK = 7,
+    TEMPORARY_DISAGREEMENT = 8,
+    PERSISTENT_DISAGREEMENT = 9,
+    COMMON_PROCESS_CHANGE = 10,
+    SENSOR1_DRIFT = 11
+};
+
+FaultMode activeFaultMode = NONE;
+unsigned long faultModeSample = 0;
+float frozenSensor1 = NAN;
+float frozenSensor2 = NAN;
+
+const float BIAS_OFFSET_C = 2.0;
+const float DISAGREEMENT_OFFSET_C = 5.0;
+const float PROCESS_RAMP_STEP_C = 0.25;
+const float COMMON_PROCESS_MAX_OFFSET_C = 2.0;
+const float DRIFT_MAX_OFFSET_C = 5.0;
 
 bool sensor1Stuck = false;
 bool sensor2Stuck = false;
@@ -132,9 +160,6 @@ const int DISAGREEMENT_CONFIRM_SAMPLES = 3;
 const int DISAGREEMENT_CLEAR_SAMPLES = 3;
 
 float lastTrustedTControl = NAN;
-
-bool debounceTestEnabled = true;
-int debounceTestSample = 0;
 
 void connectWiFi() {
     Serial.println("Connecting to WiFi...");
@@ -203,6 +228,7 @@ void setup() {
 
     mb.addCoil(COIL_HEATER_CMD, false);
     mb.addHreg(HR_PLC_HEARTBEAT, 0);
+    mb.addHreg(HR_FAULT_MODE, NONE);
 
     Serial.println("DS18B20 Sensor 1&2 test");
 }
@@ -216,12 +242,171 @@ void startTemperatureConversion(unsigned long currentTime) {
 }
 
 void finishInputRead() {
-    temperature1 = sensor1.getTempCByIndex(0);
-    temperature2 = sensor2.getTempCByIndex(0);
+    acquiredTemperature1 = sensor1.getTempCByIndex(0);
+    acquiredTemperature2 = sensor2.getTempCByIndex(0);
 
     potValue = analogRead(POT_PIN);
 
     temperatureConversionInProgress = false;
+}
+
+bool isFaultModeValid(uint16_t modeValue) {
+    return modeValue <= SENSOR1_DRIFT;
+}
+
+const char* faultModeToString(FaultMode mode) {
+    switch (mode) {
+        case NONE:
+            return "NONE";
+        case SENSOR1_DISCONNECTED:
+            return "SENSOR1_DISCONNECTED";
+        case SENSOR2_DISCONNECTED:
+            return "SENSOR2_DISCONNECTED";
+        case BOTH_SENSORS_DISCONNECTED:
+            return "BOTH_SENSORS_DISCONNECTED";
+        case SENSOR1_BIAS:
+            return "SENSOR1_BIAS";
+        case SENSOR2_BIAS:
+            return "SENSOR2_BIAS";
+        case SENSOR1_STUCK:
+            return "SENSOR1_STUCK";
+        case SENSOR2_STUCK:
+            return "SENSOR2_STUCK";
+        case TEMPORARY_DISAGREEMENT:
+            return "TEMPORARY_DISAGREEMENT";
+        case PERSISTENT_DISAGREEMENT:
+            return "PERSISTENT_DISAGREEMENT";
+        case COMMON_PROCESS_CHANGE:
+            return "COMMON_PROCESS_CHANGE";
+        case SENSOR1_DRIFT:
+            return "SENSOR1_DRIFT";
+        default:
+            return "INVALID";
+    }
+}
+
+float boundedFaultRamp(float maximumOffset) {
+    float offset =
+        (faultModeSample + 1)
+        * PROCESS_RAMP_STEP_C;
+
+    if (offset > maximumOffset) {
+        offset = maximumOffset;
+    }
+
+    return offset;
+}
+
+void selectFaultMode() {
+    uint16_t requestedValue =
+        mb.Hreg(HR_FAULT_MODE);
+
+    if (!isFaultModeValid(requestedValue)) {
+        Serial.print("Invalid fault mode ");
+        Serial.print(requestedValue);
+        Serial.println("; restoring NONE");
+
+        requestedValue = NONE;
+        mb.Hreg(HR_FAULT_MODE, NONE);
+    }
+
+    FaultMode requestedMode =
+        static_cast<FaultMode>(requestedValue);
+
+    if (requestedMode == activeFaultMode) {
+        return;
+    }
+
+    activeFaultMode = requestedMode;
+    faultModeSample = 0;
+    frozenSensor1 = acquiredTemperature1;
+    frozenSensor2 = acquiredTemperature2;
+
+    Serial.print("Fault mode changed to ");
+    Serial.println(faultModeToString(activeFaultMode));
+}
+
+void applyFaultInjection() {
+    selectFaultMode();
+
+    // Every cycle begins with fresh acquisition. Test modes modify only
+    // these effective measurements; diagnostics are never set directly.
+    temperature1 = acquiredTemperature1;
+    temperature2 = acquiredTemperature2;
+
+    switch (activeFaultMode) {
+        case NONE:
+            break;
+
+        case SENSOR1_DISCONNECTED:
+            temperature1 = DEVICE_DISCONNECTED_C;
+            break;
+
+        case SENSOR2_DISCONNECTED:
+            temperature2 = DEVICE_DISCONNECTED_C;
+            break;
+
+        case BOTH_SENSORS_DISCONNECTED:
+            temperature1 = DEVICE_DISCONNECTED_C;
+            temperature2 = DEVICE_DISCONNECTED_C;
+            break;
+
+        case SENSOR1_BIAS:
+            temperature1 += BIAS_OFFSET_C;
+            break;
+
+        case SENSOR2_BIAS:
+            temperature2 += BIAS_OFFSET_C;
+            break;
+
+        case SENSOR1_STUCK:
+            temperature1 = frozenSensor1;
+            temperature2 +=
+                boundedFaultRamp(
+                    COMMON_PROCESS_MAX_OFFSET_C
+                );
+            break;
+
+        case SENSOR2_STUCK:
+            temperature1 +=
+                boundedFaultRamp(
+                    COMMON_PROCESS_MAX_OFFSET_C
+                );
+            temperature2 = frozenSensor2;
+            break;
+
+        case TEMPORARY_DISAGREEMENT:
+            if (faultModeSample == 0) {
+                temperature1 +=
+                    DISAGREEMENT_OFFSET_C;
+            }
+            break;
+
+        case PERSISTENT_DISAGREEMENT:
+            temperature1 +=
+                DISAGREEMENT_OFFSET_C;
+            break;
+
+        case COMMON_PROCESS_CHANGE: {
+            float processOffset =
+                boundedFaultRamp(
+                    COMMON_PROCESS_MAX_OFFSET_C
+                );
+
+            temperature1 += processOffset;
+            temperature2 += processOffset;
+            break;
+        }
+
+        case SENSOR1_DRIFT:
+            temperature1 +=
+                boundedFaultRamp(
+                    DRIFT_MAX_OFFSET_C
+                );
+            break;
+    }
+
+    faultModeSample++;
 }
 
 void runDiagnostics() {
@@ -533,13 +718,13 @@ const char* diagnosticStatusToString() {
 }
 
 void updateModbusInputRegisters() {
-    uint16_t temp1Modbus =
-        (uint16_t)
-        round(temperature1 * 100.0);
+    uint16_t temp1Modbus = sensor1Valid
+        ? (uint16_t)round(temperature1 * 100.0)
+        : MODBUS_INVALID_VALUE;
 
-    uint16_t temp2Modbus =
-        (uint16_t)
-        round(temperature2 * 100.0);
+    uint16_t temp2Modbus = sensor2Valid
+        ? (uint16_t)round(temperature2 * 100.0)
+        : MODBUS_INVALID_VALUE;
 
     uint16_t tControlModbus;
     if (tControlValid) {
@@ -548,12 +733,12 @@ void updateModbusInputRegisters() {
             round(tControl * 100.0);
     }
     else {
-        tControlModbus = 65535;
+        tControlModbus = MODBUS_INVALID_VALUE;
     }
 
-    uint16_t sensorDiffModbus =
-        (uint16_t)
-        round(sensorDifference * 100.0);
+    uint16_t sensorDiffModbus = bothSensorsValid
+        ? (uint16_t)round(sensorDifference * 100.0)
+        : MODBUS_INVALID_VALUE;
 
     uint16_t potScaledModbus =
         (uint16_t)
@@ -656,17 +841,6 @@ void readModbusCommands() {
         );
 }
 
-void applyDriftTest() {
-
-    if (!driftTestEnabled) {
-        return;
-    }
-
-    driftOffset += 0.25;
-
-    temperature1 = temperature2 + driftOffset;
-}
-
 void detectStuckSensors() {
 
     if (!sensor1Valid || !sensor2Valid) {
@@ -719,6 +893,17 @@ void detectStuckSensors() {
 }
 
 void logMeasurements(unsigned long timestamp) {
+    Serial.print("Fault mode: ");
+    Serial.println(faultModeToString(activeFaultMode));
+
+    if (activeFaultMode != NONE) {
+        Serial.print("Acquired temperatures: ");
+        Serial.print(acquiredTemperature1);
+        Serial.print(" C, ");
+        Serial.print(acquiredTemperature2);
+        Serial.println(" C");
+    }
+
     Serial.print("[");
     Serial.print(timestamp);
     Serial.print(" ms] Temperature 1: ");
@@ -820,44 +1005,6 @@ void logMeasurements(unsigned long timestamp) {
     Serial.println("--------------------");
 }
 
-void applyDebounceTest() {
-
-    if (!debounceTestEnabled) {
-        return;
-    }
-
-    if (!plcCommsOK || !heaterCommand) {
-        return;
-    }
-
-    debounceTestSample++;
-
-    if (debounceTestSample <= 3) {
-        temperature1 = 25.0;
-        temperature2 = 25.0;
-    }
-
-    else if (debounceTestSample == 4) {
-        temperature1 = 30.0;
-        temperature2 = 25.0;
-    }
-
-    else if (debounceTestSample <= 7) {
-        temperature1 = 25.0;
-        temperature2 = 25.0;
-    }
-
-    else if (debounceTestSample <= 10) {
-        temperature1 = 30.0;
-        temperature2 = 25.0;
-    }
-
-    else {
-        temperature1 = 25.0;
-        temperature2 = 25.0;
-    }
-}
-
 void loop() {
     mb.task();
 
@@ -892,8 +1039,7 @@ void loop() {
     ) {
         finishInputRead();
 
-        applyDebounceTest();
-        applyDriftTest();
+        applyFaultInjection();
 
         filterInputs();
 

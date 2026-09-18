@@ -25,6 +25,13 @@
             "attrs": {}
         },
         {
+            "type": "wokwi-ds18b20",
+            "id": "temp3",
+            "top": 20,
+            "left": 420,
+            "attrs": {}
+        },
+        {
             "type": "wokwi-resistor",
             "id": "r1",
             "top": -40,
@@ -38,6 +45,15 @@
             "id": "r2",
             "top": -40,
             "left": 260,
+            "attrs": {
+                "resistance": "4700"
+            }
+        },
+        {
+            "type": "wokwi-resistor",
+            "id": "r3",
+            "top": -40,
+            "left": 360,
             "attrs": {
                 "resistance": "4700"
             }
@@ -72,6 +88,11 @@
         ["temp2:DQ", "esp:19", "green", []],
         ["r2:1", "temp2:DQ", "red", []],
         ["r2:2", "temp2:VCC", "green", []],
+        ["temp3:VCC", "esp:3V3", "red", []],
+        ["temp3:GND", "esp:GND.1", "black", []],
+        ["temp3:DQ", "esp:21", "green", []],
+        ["r3:1", "temp3:DQ", "red", []],
+        ["r3:2", "temp3:VCC", "green", []],
         ["pot1:SIG", "esp:34", "green", []],
         ["pot1:GND", "esp:GND.1", "black", []],
         ["pot1:VCC", "esp:3V3", "red", []],

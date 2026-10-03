@@ -1,0 +1,25 @@
+name: PlatformIO build
+
+on:
+  push:
+    branches:
+      - virtual-v2-cleanup
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build ESP32 firmware
+        run: pio run -e esp32dev

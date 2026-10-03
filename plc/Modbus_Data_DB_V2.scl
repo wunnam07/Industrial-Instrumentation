@@ -1,0 +1,25 @@
+// TIA Portal V19 / S7-1500
+// Raw Modbus receive buffer for Virtual Modbus Interface v2.
+//
+// The ESP32 virtual node publishes exactly seven operational input registers:
+//   0 TEMP1
+//   1 TEMP2
+//   2 TEMP3
+//   3 ESP32_HEARTBEAT
+//   4 SENSOR1_HEALTH
+//   5 SENSOR2_HEALTH
+//   6 SENSOR3_HEALTH
+//
+// IMPORTANT:
+//   Keep the existing working MB_CLIENT connection parameters and base address.
+//   Only reduce the read length from 19 registers to 7 and point the receive
+//   data at inputRegisters[0..6].
+
+DATA_BLOCK "Modbus_Data_DB"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.2
+STRUCT
+    inputRegisters : ARRAY[0..6] OF WORD;
+END_STRUCT;
+BEGIN
+END_DATA_BLOCK

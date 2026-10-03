@@ -1,15 +1,24 @@
 // TIA Portal V19 / S7-1500
 // Virtual Modbus Interface v2 PLC import bundle.
 //
-// Creates/replaces:
+// Creates/replaces only the PLC communication boundary objects:
 //   1. Modbus_Data_DB       - seven-word raw receive buffer
-//   2. Process_Data_DB      - decoded external measurement/health data
+//   2. Process_Data_DB      - decoded measurement/health interface
 //   3. Decode_Process_Data  - decoder for the seven-register contract
 //
-// IMPORTANT BEFORE GENERATING BLOCKS:
+// IMPORTANT:
 //   Preserve the existing working MB_CLIENT connection settings and base
 //   address. Change only the operational read length from 19 words to 7 and
 //   point the receive data at Modbus_Data_DB.inputRegisters[0..6].
+//
+// Downstream verified blocks are intentionally NOT replaced by this bundle:
+//   Heartbeat_Watchdog
+//   Trusted_Temperature_Selector
+//   Evaluate_Temp_Quality / PLC_Status_DB
+//   Process_State_Control
+//   Heater_Permissive
+//   Heater_Demand_Hysteresis
+//   Calculate_Heater_Output
 //
 // Virtual v2 Modbus input-register offsets:
 //   0 TEMP1 x100, 16#FFFF invalid
@@ -28,6 +37,11 @@
 //   4 STUCK
 //   5 RECOVERING
 //   6 NOT_READY
+//
+// Compatibility rule:
+//   TempX_Valid retains its verified v1 meaning: raw numeric temperature
+//   received (not 16#FFFF). Sensor health and communication freshness remain
+//   separate evidence and are combined later by Evaluate_Temp_Quality.
 
 DATA_BLOCK "Modbus_Data_DB"
 { S7_Optimized_Access := 'TRUE' }
@@ -65,7 +79,6 @@ FUNCTION "Decode_Process_Data" : Void
 { S7_Optimized_Access := 'TRUE' }
 VERSION : 0.2
 BEGIN
-    // Decode health first because temperature validity depends on it.
     "Process_Data_DB".Sensor1_Health :=
         WORD_TO_UINT("Modbus_Data_DB".inputRegisters[4]);
 
@@ -79,8 +92,7 @@ BEGIN
         WORD_TO_UINT("Modbus_Data_DB".inputRegisters[3]);
 
     "Process_Data_DB".Temp1_Valid :=
-        ("Modbus_Data_DB".inputRegisters[0] <> 16#FFFF)
-        AND ("Process_Data_DB".Sensor1_Health = UINT#0);
+        "Modbus_Data_DB".inputRegisters[0] <> 16#FFFF;
 
     IF "Process_Data_DB".Temp1_Valid THEN
         "Process_Data_DB".Temp1_C :=
@@ -92,8 +104,7 @@ BEGIN
     END_IF;
 
     "Process_Data_DB".Temp2_Valid :=
-        ("Modbus_Data_DB".inputRegisters[1] <> 16#FFFF)
-        AND ("Process_Data_DB".Sensor2_Health = UINT#0);
+        "Modbus_Data_DB".inputRegisters[1] <> 16#FFFF;
 
     IF "Process_Data_DB".Temp2_Valid THEN
         "Process_Data_DB".Temp2_C :=
@@ -105,8 +116,7 @@ BEGIN
     END_IF;
 
     "Process_Data_DB".Temp3_Valid :=
-        ("Modbus_Data_DB".inputRegisters[2] <> 16#FFFF)
-        AND ("Process_Data_DB".Sensor3_Health = UINT#0);
+        "Modbus_Data_DB".inputRegisters[2] <> 16#FFFF;
 
     IF "Process_Data_DB".Temp3_Valid THEN
         "Process_Data_DB".Temp3_C :=

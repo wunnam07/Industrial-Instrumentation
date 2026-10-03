@@ -1,0 +1,119 @@
+// TIA Portal V19 / S7-1500
+// Virtual Modbus Interface v2 PLC import bundle.
+//
+// Creates/replaces:
+//   1. Modbus_Data_DB       - seven-word raw receive buffer
+//   2. Process_Data_DB      - decoded external measurement/health data
+//   3. Decode_Process_Data  - decoder for the seven-register contract
+//
+// IMPORTANT BEFORE GENERATING BLOCKS:
+//   Preserve the existing working MB_CLIENT connection settings and base
+//   address. Change only the operational read length from 19 words to 7 and
+//   point the receive data at Modbus_Data_DB.inputRegisters[0..6].
+//
+// Virtual v2 Modbus input-register offsets:
+//   0 TEMP1 x100, 16#FFFF invalid
+//   1 TEMP2 x100, 16#FFFF invalid
+//   2 TEMP3 x100, 16#FFFF invalid
+//   3 ESP32 heartbeat
+//   4 Sensor 1 health
+//   5 Sensor 2 health
+//   6 Sensor 3 health
+//
+// ESP32 health enumeration:
+//   0 HEALTHY
+//   1 READ_FAILURE
+//   2 OUT_OF_RANGE
+//   3 STALE
+//   4 STUCK
+//   5 RECOVERING
+//   6 NOT_READY
+
+DATA_BLOCK "Modbus_Data_DB"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.2
+STRUCT
+    inputRegisters : ARRAY[0..6] OF WORD;
+END_STRUCT;
+BEGIN
+END_DATA_BLOCK
+
+
+DATA_BLOCK "Process_Data_DB"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.2
+STRUCT
+    Temp1_C : Real := 0.0;
+    Temp2_C : Real := 0.0;
+    Temp3_C : Real := 0.0;
+
+    Temp1_Valid : Bool := FALSE;
+    Temp2_Valid : Bool := FALSE;
+    Temp3_Valid : Bool := FALSE;
+
+    ESP32_Heartbeat : UInt := 0;
+
+    Sensor1_Health : UInt := 6;
+    Sensor2_Health : UInt := 6;
+    Sensor3_Health : UInt := 6;
+END_STRUCT;
+BEGIN
+END_DATA_BLOCK
+
+
+FUNCTION "Decode_Process_Data" : Void
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.2
+BEGIN
+    // Decode health first because temperature validity depends on it.
+    "Process_Data_DB".Sensor1_Health :=
+        WORD_TO_UINT("Modbus_Data_DB".inputRegisters[4]);
+
+    "Process_Data_DB".Sensor2_Health :=
+        WORD_TO_UINT("Modbus_Data_DB".inputRegisters[5]);
+
+    "Process_Data_DB".Sensor3_Health :=
+        WORD_TO_UINT("Modbus_Data_DB".inputRegisters[6]);
+
+    "Process_Data_DB".ESP32_Heartbeat :=
+        WORD_TO_UINT("Modbus_Data_DB".inputRegisters[3]);
+
+    "Process_Data_DB".Temp1_Valid :=
+        ("Modbus_Data_DB".inputRegisters[0] <> 16#FFFF)
+        AND ("Process_Data_DB".Sensor1_Health = UINT#0);
+
+    IF "Process_Data_DB".Temp1_Valid THEN
+        "Process_Data_DB".Temp1_C :=
+            UINT_TO_REAL(
+                WORD_TO_UINT("Modbus_Data_DB".inputRegisters[0])
+            ) / 100.0;
+    ELSE
+        "Process_Data_DB".Temp1_C := 0.0;
+    END_IF;
+
+    "Process_Data_DB".Temp2_Valid :=
+        ("Modbus_Data_DB".inputRegisters[1] <> 16#FFFF)
+        AND ("Process_Data_DB".Sensor2_Health = UINT#0);
+
+    IF "Process_Data_DB".Temp2_Valid THEN
+        "Process_Data_DB".Temp2_C :=
+            UINT_TO_REAL(
+                WORD_TO_UINT("Modbus_Data_DB".inputRegisters[1])
+            ) / 100.0;
+    ELSE
+        "Process_Data_DB".Temp2_C := 0.0;
+    END_IF;
+
+    "Process_Data_DB".Temp3_Valid :=
+        ("Modbus_Data_DB".inputRegisters[2] <> 16#FFFF)
+        AND ("Process_Data_DB".Sensor3_Health = UINT#0);
+
+    IF "Process_Data_DB".Temp3_Valid THEN
+        "Process_Data_DB".Temp3_C :=
+            UINT_TO_REAL(
+                WORD_TO_UINT("Modbus_Data_DB".inputRegisters[2])
+            ) / 100.0;
+    ELSE
+        "Process_Data_DB".Temp3_C := 0.0;
+    END_IF;
+END_FUNCTION

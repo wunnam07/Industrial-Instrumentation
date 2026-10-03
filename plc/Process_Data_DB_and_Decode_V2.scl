@@ -28,6 +28,12 @@
 //   selection, temperature quality, process state, trips, permissives,
 //   heater demand, and simulated HEATER_OUTPUT.
 //
+// Compatibility rule:
+//   Preserve the verified PLC meaning of TempX_Valid: it indicates that the
+//   decoded Modbus temperature is numeric (not 16#FFFF). Channel health and
+//   communication freshness remain separate evidence and are combined later
+//   by Evaluate_Temp_Quality, exactly as in the verified v1 PLC architecture.
+//
 // Migration:
 //   Replace the old Process_Data_DB / Decode_Process_Data blocks with these
 //   blocks in the clean virtual TIA project. Configure MB_CLIENT to read exactly
@@ -59,7 +65,9 @@ FUNCTION "Decode_Process_Data" : Void
 { S7_Optimized_Access := 'TRUE' }
 VERSION : 0.2
 BEGIN
-    // Decode channel-health evidence first because validity depends on it.
+    // Decode the seven published values. Keep numeric validity independent
+    // from health/communications so the downstream verified PLC logic retains
+    // exactly the same responsibility split as before.
     "Process_Data_DB".Sensor1_Health :=
         WORD_TO_UINT("Modbus_Data_DB".inputRegisters[4]);
 
@@ -72,11 +80,8 @@ BEGIN
     "Process_Data_DB".ESP32_Heartbeat :=
         WORD_TO_UINT("Modbus_Data_DB".inputRegisters[3]);
 
-    // A temperature is accepted as channel-valid only when the ESP32 publishes
-    // a numeric value AND the corresponding acquisition health is HEALTHY.
     "Process_Data_DB".Temp1_Valid :=
-        ("Modbus_Data_DB".inputRegisters[0] <> 16#FFFF)
-        AND ("Process_Data_DB".Sensor1_Health = UINT#0);
+        "Modbus_Data_DB".inputRegisters[0] <> 16#FFFF;
 
     IF "Process_Data_DB".Temp1_Valid THEN
         "Process_Data_DB".Temp1_C :=
@@ -88,8 +93,7 @@ BEGIN
     END_IF;
 
     "Process_Data_DB".Temp2_Valid :=
-        ("Modbus_Data_DB".inputRegisters[1] <> 16#FFFF)
-        AND ("Process_Data_DB".Sensor2_Health = UINT#0);
+        "Modbus_Data_DB".inputRegisters[1] <> 16#FFFF;
 
     IF "Process_Data_DB".Temp2_Valid THEN
         "Process_Data_DB".Temp2_C :=
@@ -101,8 +105,7 @@ BEGIN
     END_IF;
 
     "Process_Data_DB".Temp3_Valid :=
-        ("Modbus_Data_DB".inputRegisters[2] <> 16#FFFF)
-        AND ("Process_Data_DB".Sensor3_Health = UINT#0);
+        "Modbus_Data_DB".inputRegisters[2] <> 16#FFFF;
 
     IF "Process_Data_DB".Temp3_Valid THEN
         "Process_Data_DB".Temp3_C :=

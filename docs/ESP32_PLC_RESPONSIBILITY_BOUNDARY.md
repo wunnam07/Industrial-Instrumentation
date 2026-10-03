@@ -1,60 +1,63 @@
-# ESP32/PLC responsibility boundary
+# ESP32/PLC responsibility boundary — virtual project
 
-This contract applies to the active Wokwi/PLCSIM build.
+This file describes the final virtual architecture on the `virtual-v2-cleanup` branch. The detailed register contract is in `docs/VIRTUAL_MODBUS_INTERFACE_V2.md`.
 
-## Ownership
+## Ownership rule
 
 ~~~text
-T1 / T2 / T3 / analog input
-              |
-              v
-ESP32: acquisition, quality, freshness, diagnostic evidence, heartbeat
-              |
-              | Modbus TCP
-              v
-PLC: measurement acceptance, T_CONTROL, process state, permissives,
-     trips, hysteresis, Auto/Manual, and simulated HEATER_OUTPUT
+DS18B20 A / B / C
+        |
+        v
+ESP32
+- acquire the three temperature channels
+- detect acquisition/read/range/freshness/stuck health
+- qualify channel recovery
+- publish an application heartbeat
+        |
+        | Modbus TCP
+        v
+S7-1500 PLC
+- supervise communication freshness
+- decide PLC-side channel usability
+- compare channels / determine agreement
+- select trusted temperature
+- classify temperature quality
+- own process state
+- own warning, trip, reset and interlocks
+- own heater demand and permissive
+- own simulated HEATER_OUTPUT
 ~~~
 
-The ESP32 does not decide whether the simulated heater is on. Its comparator
-may publish a temperature candidate for diagnostics and regression comparison,
-but that value is not the PLC's authoritative control temperature.
+The design rule is:
 
-## Stable Modbus address locations
+> ESP32 publishes measurements and acquisition evidence. PLC makes control decisions.
 
-Existing address locations are retained so consumers do not fail because
-registers moved. Two legacy meanings are deliberately narrowed:
+## Virtual operational interface
 
-| Type/address | Active simulated meaning |
-|---|---|
-| Input register 0 | Sensor 1 temperature, scaled by 100; 65535 if invalid |
-| Input register 1 | Sensor 2 temperature, scaled by 100; 65535 if invalid |
-| Input register 2 | ESP32 diagnostic temperature candidate, scaled by 100; non-authoritative |
-| Input register 3 | Absolute Sensor 1/Sensor 2 difference, scaled by 100 |
-| Input registers 4–6 | Analog raw/scaled value and diagnostic status |
-| Input register 7 | Legacy process state: always 65535 because the PLC owns process state |
-| Input register 8 | ESP32 heartbeat; increments with each completed measurement cycle |
-| Input register 9 | Sensor 3 temperature, scaled by 100; 65535 if invalid |
-| Input registers 10–12 | Differences 1/3 and 2/3, then comparator/voting status |
-| Input registers 13–18 | Per-channel health and recovery counters |
-| Discrete input 0 | Instrument node ready after the first completed diagnostic cycle |
-| Discrete inputs 1–3 | Sensor 1 validity, Sensor 2 validity, and agreement 1/2 |
-| Discrete input 4 | Diagnostic temperature candidate valid |
-| Discrete inputs 5–7 | Physical-output compatibility status; always false in the simulated build |
-| Discrete inputs 8–11 | Sensor 3 validity, agreement 1/3, agreement 2/3, comparator resolved |
+The virtual build exposes exactly seven operational Modbus input registers:
 
-Holding register 1 remains the test-only fault-injection selector.
+| Offset | Meaning |
+|---:|---|
+| 0 | Temperature channel A |
+| 1 | Temperature channel B |
+| 2 | Temperature channel C |
+| 3 | ESP32 heartbeat |
+| 4 | Channel A health |
+| 5 | Channel B health |
+| 6 | Channel C health |
 
-Coil 0 and holding register 0 retain their future physical-output address
-locations. With ENABLE_PHYSICAL_HEATER_OUTPUT=0, writes are accepted for
-compatibility but have no effect on GPIO, diagnostic values, or any simulated
-heater output.
+There are no virtual-project coils and no physical-heater command/status objects.
 
-## Future physical-output build
+One holding register at offset 0 is reserved for controlled fault injection during test/commissioning. It is not part of normal PLC control operation.
 
-The GPIO/MOSFET path is isolated behind ENABLE_PHYSICAL_HEATER_OUTPUT.
-When explicitly enabled for a later physical prototype, the ESP32 can execute
-the PLC's heater demand and reject it when the PLC heartbeat expires. The PLC
-still owns temperature selection, process permissives, trips and demand.
+## Deliberately removed from the virtual boundary
 
-The physical flag is disabled in the active esp32dev PlatformIO environment.
+The ESP32 no longer publishes a trusted/candidate process temperature, pairwise differences, voting result, global process state, potentiometer values, recovery counters, agreement discrete inputs, or any physical-heater compatibility objects.
+
+Those values either duplicate information the PLC already owns, expose ESP32 implementation details that the PLC does not need, or belong only to a future physical extension.
+
+## Physical extension
+
+The pre-refactor broader firmware is preserved on the `physical-capable-baseline` branch. A later physical project should be developed separately from the clean virtual baseline and may add a PLC-to-ESP32 final output command plus PLC heartbeat/freshness supervision.
+
+The PLC remains the sole authority for trusted temperature, process state, trips, permissives, heater demand and final output decision.

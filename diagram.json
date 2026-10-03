@@ -57,22 +57,6 @@
             "attrs": {
                 "resistance": "4700"
             }
-        },
-        {
-            "type": "wokwi-potentiometer",
-            "id": "pot1",
-            "top": 0,
-            "left": -400,
-            "attrs": {}
-        },
-        {
-            "type": "wokwi-led",
-            "id": "led1",
-            "top": 0,
-            "left": -100,
-            "attrs": {
-                "color": "red"
-            }
         }
     ],
     "connections": [
@@ -92,12 +76,7 @@
         ["temp3:GND", "esp:GND.1", "black", []],
         ["temp3:DQ", "esp:21", "green", []],
         ["r3:1", "temp3:DQ", "red", []],
-        ["r3:2", "temp3:VCC", "green", []],
-        ["pot1:SIG", "esp:34", "green", []],
-        ["pot1:GND", "esp:GND.1", "black", []],
-        ["pot1:VCC", "esp:3V3", "red", []],
-        ["led1:A", "esp:23", "green", []],
-        ["led1:C", "esp:GND.1", "black", []]
+        ["r3:2", "temp3:VCC", "green", []]
     ],
     "serialMonitor": {
         "display": "always"

@@ -1,14 +1,12 @@
 # TIA Portal migration — Virtual Modbus Interface v2
 
-This migration changes only the ESP32/PLC data contract. The downstream control architecture remains the verified baseline unless compilation or testing proves otherwise.
+**Status: COMPLETE — incorporated into the frozen final virtual baseline on 3 October 2026.**
 
-## 1. Preserve the working project first
+This migration changed only the ESP32/PLC data contract. The downstream control architecture remained the verified baseline.
 
-Create a copy/archive of the current TIA project before editing it. Treat that copy as the pre-v2 PLC baseline.
+## Final raw Modbus receive buffer
 
-## 2. Replace the raw Modbus receive buffer
-
-Use `Modbus_Data_DB_V2.scl` so the PLC raw buffer is:
+The PLC raw buffer is:
 
 ```text
 Modbus_Data_DB.inputRegisters[0..6] : ARRAY OF WORD
@@ -26,11 +24,11 @@ The seven words are:
 | 5 | Sensor 2 health |
 | 6 | Sensor 3 health |
 
-## 3. Change the existing MB_CLIENT read from 19 words to 7
+## Final MB_CLIENT change
 
-Do not redesign the working connection configuration.
+The working Modbus TCP connection configuration was preserved. The operational receive length was changed from 19 words to 7 and the receive target is the new `Modbus_Data_DB.inputRegisters[0..6]` array.
 
-Keep the existing values that already worked for:
+The existing working values were retained for:
 
 - Modbus TCP connection / CONNECT structure
 - server IP and TCP port
@@ -39,17 +37,11 @@ Keep the existing values that already worked for:
 - request-trigger logic
 - BUSY/DONE/ERROR handling
 
-Change only the operational data length from **19** input registers to **7** and make the receive target the new `Modbus_Data_DB.inputRegisters[0..6]` array.
+The base Modbus data address was not changed merely because firmware offsets are documented from zero.
 
-In the existing MB_CLIENT call, this is the parameter that previously requested 19 registers (`MB_DATA_LEN` in the current Siemens block interface).
+## Final decoded process-data model
 
-Do not change the base address merely because the firmware uses zero-based internal offsets. Preserve the base address that already produced the correct old TEMP1 value at `inputRegisters[0]`.
-
-## 4. Replace the old process-data decoder
-
-Import/replace with `Process_Data_DB_and_Decode_V2.scl`.
-
-The new decoded external-data model is intentionally limited to:
+`Process_Data_DB_and_Decode_V2.scl` provides:
 
 ```text
 Temp1_C
@@ -64,11 +56,15 @@ Sensor2_Health
 Sensor3_Health
 ```
 
-The removed PLC fields are not missing functionality. They were either obsolete, redundant, test-only, or calculations now owned elsewhere in the PLC.
+The frozen decoder preserves the previously verified raw-validity semantics:
 
-## 5. Keep the existing downstream execution order
+```text
+TempN_Valid := raw TempN <> 16#FFFF
+```
 
-Use the verified order:
+Sensor health and communication freshness remain separate evidence. `Evaluate_Temp_Quality` combines them downstream, so a channel is usable only when communication is healthy, the raw temperature is valid, and the corresponding ESP32 health state is `HEALTHY`.
+
+## Retained execution order
 
 ```text
 Cyclic Modbus request generation
@@ -83,7 +79,7 @@ Heater_Demand_Hysteresis
 Calculate_Heater_Output
 ```
 
-## 6. OB1 signal wiring that should remain
+## Retained OB1 signal wiring
 
 `Heartbeat_Watchdog`:
 
@@ -105,15 +101,11 @@ NewDataPulse := Heartbeat_Watchdog_DB.HeartbeatChanged
 CommsOK      := Heartbeat_Watchdog_DB.CommsOK
 ```
 
-The v2 decoder marks a channel valid only when its register is not `16#FFFF` and ESP32 health is `HEALTHY`. Therefore the trusted selector receives acquisition-qualified measurements, while it still owns cross-sensor agreement and trusted-temperature selection.
+The Process_State, heater permissive, hysteresis and final-output wiring remains unchanged from the verified baseline.
 
-`Evaluate_Temp_Quality` can remain unchanged. Its additional health checks are redundant with v2 `TempN_Valid`, but are safe and provide explicit defensive validation. Do not rewrite a verified block only to remove that redundancy before FAT.
+## Removed legacy dependencies
 
-The remaining Process_State, heater permissive, hysteresis and final-output wiring remains unchanged.
-
-## 7. Removed dependencies — check for compile references
-
-After replacing `Process_Data_DB`, search the TIA project for these old fields and remove only genuine remaining references:
+The final v2 process-data model no longer exposes:
 
 ```text
 TempCandidate_C
@@ -134,39 +126,26 @@ Sensor2_Recovery
 Sensor3_Recovery
 ```
 
-The verified downstream blocks should not require them. Any remaining reference is evidence of a hidden legacy dependency and must be reviewed rather than blindly replaced.
+These were obsolete, redundant, test-only, or calculations already owned elsewhere in the PLC.
 
-## 8. Compile gate
+## Final commissioning result
 
-Before downloading to PLCSIM:
+The migrated PLC project compiled with zero errors and was downloaded to S7-PLCSIM Advanced. During commissioning, the raw Modbus receive buffer initially remained static even though the Wokwi server and local Python Modbus client were working.
 
-- Compile software blocks.
-- Require zero compile errors.
-- Do not mark the v2 PLC migration complete if TIA silently recreated an old DB structure or if any removed field is still referenced.
+The cause was deployment state rather than the v2 register contract: the updated hardware/device configuration had not been downloaded together with the software. After downloading both **hardware and software**, `Modbus_Data_DB.inputRegisters[0..6]` updated correctly and the ESP32 values were visible in the PLC again.
 
-## 9. Minimal online commissioning sequence
+This establishes the final commissioning rule for this project:
 
-With Wokwi v2 running and PLCSIM connected:
+> After changes that affect the PLC device/network configuration, verify that both hardware configuration and software are downloaded to the simulated CPU. A successful software-only compile/download is not sufficient evidence that the running PLCSIM instance matches the offline TIA project.
 
-1. Confirm `inputRegisters[0..6]` change online.
-2. Confirm healthy temperatures decode into `Temp1_C`, `Temp2_C`, `Temp3_C`.
-3. Confirm the three health values are `0` after startup qualification.
-4. Confirm `ESP32_Heartbeat` changes and `CommsOK = TRUE`.
-5. Confirm trusted-temperature selection is valid with three agreeing channels.
-6. Inject one channel disconnect and verify that channel becomes invalid while the other two remain available.
-7. Inject a bias/disagreement and verify the biased channel can remain acquisition-healthy while PLC disagreement logic handles the measurement conflict.
-8. Inject stale/stuck/out-of-range cases and verify ESP32 health excludes the affected channel.
-9. Stop Wokwi/communications and verify PLC communication-loss behavior.
-10. Re-run warning, trip, reset, heater-permissive, hysteresis and final-output tests.
+## Final acceptance state
 
-## 10. Acceptance criterion
+The seven-register ESP32 → Modbus TCP → S7-1500/PLCSIM Advanced interface is operational, the downstream verified control architecture is retained, and the TIA Portal project has been saved as the final implementation.
 
-The migration is accepted only when the end-to-end system still proves:
+The final safety invariant remains:
 
 ```text
 HEATER_OUTPUT = HEATER_DEMAND AND HEATER_PERMISSIVE
 ```
 
-and all previously verified safety/state behaviors still pass under the new seven-register interface.
-
-Until those tests pass, `virtual-v2-cleanup` is a migration branch, not the frozen final virtual baseline.
+`virtual-v2-cleanup` is therefore no longer treated as an in-progress migration branch; it is the frozen final virtual implementation baseline.

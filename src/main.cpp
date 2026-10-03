@@ -4,66 +4,26 @@
 #include <WiFi.h>
 #include <ModbusIP_ESP8266.h>
 
-const uint16_t IR_TEMP1             = 0;
-const uint16_t IR_TEMP2             = 1;
-// Legacy address 2 is retained, but this is comparator evidence only. The
-// PLC must select the authoritative process-control temperature.
-const uint16_t IR_ESP32_TEMP_CANDIDATE = 2;
-const uint16_t IR_SENSOR_DIFF       = 3;
-const uint16_t IR_POT_RAW           = 4;
-const uint16_t IR_POT_SCALED        = 5;
-const uint16_t IR_DIAGNOSTIC_STATUS = 6;
-// Legacy process-state address. The simulated instrument-node build always
-// publishes MODBUS_INVALID_VALUE because the PLC now owns process state.
-const uint16_t IR_LEGACY_PROCESS_STATE = 7;
-const uint16_t IR_ESP32_HEARTBEAT   = 8;
-// Three-sensor additions are append-only. Existing address locations remain
-// stable; changed legacy semantics are documented above and in the interface
-// contract. IR_SENSOR_DIFF remains the T1/T2 difference.
-const uint16_t IR_TEMP3             = 9;
-const uint16_t IR_SENSOR_DIFF_13    = 10;
-const uint16_t IR_SENSOR_DIFF_23    = 11;
-const uint16_t IR_VOTING_STATUS     = 12;
-// Step 2 channel-health additions are append-only. Health values use
-// ChannelHealthState; recovery registers count consecutive qualifying reads.
-const uint16_t IR_SENSOR1_HEALTH    = 13;
-const uint16_t IR_SENSOR2_HEALTH    = 14;
-const uint16_t IR_SENSOR3_HEALTH    = 15;
-const uint16_t IR_SENSOR1_RECOVERY  = 16;
-const uint16_t IR_SENSOR2_RECOVERY  = 17;
-const uint16_t IR_SENSOR3_RECOVERY  = 18;
+// Virtual Modbus Interface v2.
+// The ESP32 publishes only measurement and acquisition-side diagnostic evidence.
+// The PLC owns agreement/voting, trusted temperature, process state, trips,
+// permissives, heater demand, and the final simulated HEATER_OUTPUT.
+const uint16_t IR_TEMP1 = 0;
+const uint16_t IR_TEMP2 = 1;
+const uint16_t IR_TEMP3 = 2;
+const uint16_t IR_ESP32_HEARTBEAT = 3;
+const uint16_t IR_SENSOR1_HEALTH = 4;
+const uint16_t IR_SENSOR2_HEALTH = 5;
+const uint16_t IR_SENSOR3_HEALTH = 6;
 
-const uint16_t DI_INSTRUMENT_NODE_READY = 0;
-const uint16_t DI_SENSOR1_VALID      = 1;
-const uint16_t DI_SENSOR2_VALID      = 2;
-const uint16_t DI_SENSORS_AGREE      = 3;
-const uint16_t DI_TEMP_CANDIDATE_VALID = 4;
-// Addresses 5..7 are retained for map compatibility. They are false when
-// ENABLE_PHYSICAL_HEATER_OUTPUT=0 and have no simulated-control authority.
-const uint16_t DI_PHYSICAL_OUTPUT_PERMISSIVE = 5;
-const uint16_t DI_PHYSICAL_HEATER_OUTPUT = 6;
-const uint16_t DI_PHYSICAL_PLC_COMMS_OK = 7;
-const uint16_t DI_SENSOR3_VALID      = 8;
-const uint16_t DI_SENSORS_AGREE_13   = 9;
-const uint16_t DI_SENSORS_AGREE_23   = 10;
-const uint16_t DI_VOTING_RESOLVED    = 11;
-
-const uint16_t COIL_PHYSICAL_HEATER_DEMAND = 0;
-const uint16_t HR_PHYSICAL_PLC_HEARTBEAT = 0;
-const uint16_t HR_FAULT_MODE = 1;
+// Test/commissioning-only interface. The PLC control program does not depend on it.
+const uint16_t HR_FAULT_MODE = 0;
 
 const uint16_t MODBUS_INVALID_VALUE = 65535;
 
-#ifndef ENABLE_PHYSICAL_HEATER_OUTPUT
-#define ENABLE_PHYSICAL_HEATER_OUTPUT 0
-#endif
-
 const int TEMP1_PIN = 18;
 const int TEMP2_PIN = 19;
-// Sensor 3 uses its own OneWire bus on otherwise-unused GPIO 21.
 const int TEMP3_PIN = 21;
-const int POT_PIN = 34;
-const int LED_PIN = 23;
 
 const char* WIFI_SSID = "Wokwi-GUEST";
 const char* WIFI_PASSWORD = "";
@@ -71,47 +31,38 @@ const char* WIFI_PASSWORD = "";
 ModbusIP mb;
 
 OneWire oneWire1(TEMP1_PIN);
-DallasTemperature sensor1(&oneWire1);
-
 OneWire oneWire2(TEMP2_PIN);
-DallasTemperature sensor2(&oneWire2);
-
 OneWire oneWire3(TEMP3_PIN);
+
+DallasTemperature sensor1(&oneWire1);
+DallasTemperature sensor2(&oneWire2);
 DallasTemperature sensor3(&oneWire3);
 
-int potValue = 0;
-float scaled_ADC = 0.0;
-float acquiredTemperature1 = 0.0;
-float acquiredTemperature2 = 0.0;
-float acquiredTemperature3 = 0.0;
-float temperature1 = 0.0;
-float temperature2 = 0.0;
-float temperature3 = 0.0;
-float filteredPotValue = 0.0;
-
-bool filterInitialized = false;
-const float FILTER_ALPHA = 0.2;
-
-unsigned long lastSampleTime = 0;
-const unsigned long SAMPLE_INTERVAL = 1000;
+const unsigned long SAMPLE_INTERVAL_MS = 1000;
+const unsigned long TEMP_CONVERSION_TIME_MS = 750;
+const unsigned long CHANNEL_STALE_TIMEOUT_MS = 3000;
 
 const float CHANNEL_MIN_TEMPERATURE_C = 0.0;
 const float CHANNEL_MAX_TEMPERATURE_C = 80.0;
-// A channel becomes stale after three missed one-second refresh opportunities.
-// This tolerates normal conversion scheduling jitter without treating a
-// numerically constant but freshly read process as stale.
-const unsigned long CHANNEL_STALE_TIMEOUT_MS =
-    3 * SAMPLE_INTERVAL;
-// Three consecutive healthy reads are short enough for this prototype to
-// recover promptly while preventing a single good read from causing re-entry.
+const uint16_t CHANNEL_QUALIFICATION_SAMPLES = 3;
 const uint16_t CHANNEL_RECOVERY_SAMPLES = 3;
+
+// Stuck detection is intentionally acquisition-side diagnostic evidence only.
+// It does not select a process-control temperature or perform PLC voting.
+const int STUCK_WINDOW_SAMPLES = 5;
+const float STUCK_MAX_CHANGE_C = 0.0625;
+const float PROCESS_CHANGE_MIN_C = 0.50;
+const float STUCK_CORROBORATION_TOLERANCE_C = 1.0;
+const uint16_t STUCK_CLEAR_SAMPLES = 3;
 
 enum ChannelHealthState : uint16_t {
     CHANNEL_HEALTHY = 0,
     CHANNEL_READ_FAILURE = 1,
     CHANNEL_OUT_OF_RANGE = 2,
     CHANNEL_STALE = 3,
-    CHANNEL_RECOVERING = 4
+    CHANNEL_STUCK = 4,
+    CHANNEL_RECOVERING = 5,
+    CHANNEL_NOT_READY = 6
 };
 
 struct ChannelHealth {
@@ -120,90 +71,41 @@ struct ChannelHealth {
     bool readHealthy = false;
     bool rangeValid = false;
     bool fresh = false;
-    bool usableForVoting = false;
+    bool everQualified = false;
     bool recoveryRequired = false;
-    uint16_t recoveryCount = 0;
+    bool stuckLatched = false;
+
+    uint16_t qualificationCount = 0;
+    uint16_t stuckClearCount = 0;
+
     unsigned long lastSuccessfulAcquisitionTime = 0;
-    uint32_t successfulAcquisitionSequence = 0;
-    ChannelHealthState state = CHANNEL_READ_FAILURE;
+
+    float stuckReferenceTemperature = NAN;
+
+    ChannelHealthState state = CHANNEL_NOT_READY;
 };
 
 ChannelHealth channel1Health;
 ChannelHealth channel2Health;
 ChannelHealth channel3Health;
 
-// These legacy names now explicitly mirror channel usability for voting and
-// remain published at the existing validity discrete-input addresses.
-bool sensor1Valid = false;
-bool sensor2Valid = false;
-bool sensor3Valid = false;
-int validSensorCount = 0;
+float acquiredTemperature1 = 0.0;
+float acquiredTemperature2 = 0.0;
+float acquiredTemperature3 = 0.0;
 
-const float SENSOR_AGREEMENT_TOLERANCE_C = 1.0;
-float sensorDifference12 = 0.0;
-float sensorDifference13 = 0.0;
-float sensorDifference23 = 0.0;
-bool sensorsAgree12 = false;
-bool sensorsAgree13 = false;
-bool sensorsAgree23 = false;
-int agreeingPairCount = 0;
-int isolatedSensor = 0;
-bool allThreeSensorsAgree = false;
-bool agreeingPairAvailable = false;
-bool unresolvedDisagreement = false;
+float temperature1 = 0.0;
+float temperature2 = 0.0;
+float temperature3 = 0.0;
 
-enum VotingStatus : uint16_t {
-    VOTE_UNRESOLVED = 0,
-    VOTE_ALL_THREE = 1,
-    VOTE_PAIR_12 = 2,
-    VOTE_PAIR_13 = 3,
-    VOTE_PAIR_23 = 4,
-    VOTE_SINGLE_1 = 5,
-    VOTE_SINGLE_2 = 6,
-    VOTE_SINGLE_3 = 7
-};
-
-VotingStatus votingStatus = VOTE_UNRESOLVED;
-
-float diagnosticTempCandidate = 0.0;
-bool diagnosticTempCandidateValid = false;
-
-enum DiagnosticStatus {
-    ALL_THREE_SENSORS_VALID = 0,
-    SENSOR_1_FAULT = 1,
-    SENSOR_2_FAULT = 2,
-    SENSOR_DISAGREEMENT = 3,
-    NO_VALID_SENSOR = 4,
-    SENSOR_1_STUCK = 5,
-    SENSOR_2_STUCK = 6,
-    SENSOR_DISAGREEMENT_PENDING = 7,
-    SENSOR_3_FAULT = 8,
-    SENSOR_1_OUTLIER = 9,
-    SENSOR_2_OUTLIER = 10,
-    SENSOR_3_OUTLIER = 11,
-    SENSOR_3_STUCK = 12,
-    INSUFFICIENT_REDUNDANCY = 13
-};
-
-DiagnosticStatus diagnosticStatus = NO_VALID_SENSOR;
-
-bool instrumentNodeReady = false;
-
-bool temperatureConversionInProgress = false;
+unsigned long lastSampleTime = 0;
 unsigned long temperatureRequestTime = 0;
-const unsigned long TEMP_CONVERSION_TIME = 750;
-
+bool temperatureConversionInProgress = false;
 uint16_t esp32Heartbeat = 0;
 
-#if ENABLE_PHYSICAL_HEATER_OUTPUT
-bool physicalPlcCommsOK = false;
-bool physicalOutputPermissive = false;
-bool physicalHeaterDemand = false;
-bool physicalHeaterOutput = false;
-uint16_t lastPhysicalPlcHeartbeat = 0;
-unsigned long lastPhysicalPlcHeartbeatTime = 0;
-const unsigned long PHYSICAL_PLC_COMMS_TIMEOUT = 3000;
-#endif
+float stuckWindowStartT1 = NAN;
+float stuckWindowStartT2 = NAN;
+float stuckWindowStartT3 = NAN;
+int stuckWindowSampleCount = 0;
 
 enum FaultMode : uint16_t {
     NONE = 0,
@@ -230,8 +132,6 @@ enum FaultMode : uint16_t {
     SENSOR1_STALE_ACQUISITION = 21,
     SENSOR2_STALE_ACQUISITION = 22,
     SENSOR3_STALE_ACQUISITION = 23,
-    // Robustness-characterization profiles are append-only combinations of
-    // measurement/acquisition conditions. They never assign diagnostics.
     SENSOR1_DISCONNECTED_SENSOR2_BIAS = 24,
     SENSOR1_DISCONNECTED_SENSOR2_STUCK = 25,
     SENSOR1_OUT_OF_RANGE_SENSOR3_BIAS = 26,
@@ -257,132 +157,27 @@ const float COMMON_PROCESS_MAX_OFFSET_C = 2.0;
 const float DRIFT_MAX_OFFSET_C = 5.0;
 const float OUT_OF_RANGE_TEMPERATURE_C = 100.0;
 
-bool sensor1Stuck = false;
-bool sensor2Stuck = false;
-bool sensor3Stuck = false;
-
-float stuckWindowStartT1 = NAN;
-float stuckWindowStartT2 = NAN;
-float stuckWindowStartT3 = NAN;
-
-int stuckWindowSamples = 0;
-
-const int STUCK_WINDOW_SAMPLES = 5;
-const float STUCK_MAX_CHANGE = 0.0625;
-const float PROCESS_CHANGE_MIN = 0.50;
-
-bool sensorDisagreementConfirmed = false;
-bool disagreementPending = false;
-
-int disagreementBadCount = 0;
-int disagreementGoodCount = 0;
-
-const int DISAGREEMENT_CONFIRM_SAMPLES = 3;
-const int DISAGREEMENT_CLEAR_SAMPLES = 3;
-
-float lastDiagnosticTempCandidate = NAN;
-
 void connectWiFi() {
     Serial.println("Connecting to WiFi...");
-
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD, 6);
 
-    unsigned long wifiStartTime = millis();
-
+    unsigned long start = millis();
     while (
         WiFi.status() != WL_CONNECTED &&
-        millis() - wifiStartTime < 10000
+        millis() - start < 10000
     ) {
         delay(250);
         Serial.print(".");
     }
 
     Serial.println();
-
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("WiFi connected");
-        Serial.print("ESP32 IP address: ");
+        Serial.print("WiFi connected. ESP32 IP: ");
         Serial.println(WiFi.localIP());
     }
     else {
         Serial.println("WiFi connection failed");
     }
-}
-
-void setup() {
-    Serial.begin(115200);
-    delay(1000);
-
-    pinMode(LED_PIN, OUTPUT);
-    digitalWrite(LED_PIN, LOW);
-
-    sensor1.begin();
-    sensor2.begin();
-    sensor3.begin();
-
-    sensor1.setWaitForConversion(false);
-    sensor2.setWaitForConversion(false);
-    sensor3.setWaitForConversion(false);
-
-    connectWiFi();
-
-    mb.server();
-
-    mb.addIreg(IR_TEMP1);
-    mb.addIreg(IR_TEMP2);
-    mb.addIreg(
-        IR_ESP32_TEMP_CANDIDATE,
-        MODBUS_INVALID_VALUE
-    );
-    mb.addIreg(IR_SENSOR_DIFF);
-    mb.addIreg(IR_POT_RAW);
-    mb.addIreg(IR_POT_SCALED);
-    mb.addIreg(IR_DIAGNOSTIC_STATUS);
-    mb.addIreg(
-        IR_LEGACY_PROCESS_STATE,
-        MODBUS_INVALID_VALUE
-    );
-    mb.addIreg(IR_ESP32_HEARTBEAT);
-    mb.addIreg(IR_TEMP3);
-    mb.addIreg(IR_SENSOR_DIFF_13);
-    mb.addIreg(IR_SENSOR_DIFF_23);
-    mb.addIreg(IR_VOTING_STATUS);
-    mb.addIreg(IR_SENSOR1_HEALTH);
-    mb.addIreg(IR_SENSOR2_HEALTH);
-    mb.addIreg(IR_SENSOR3_HEALTH);
-    mb.addIreg(IR_SENSOR1_RECOVERY);
-    mb.addIreg(IR_SENSOR2_RECOVERY);
-    mb.addIreg(IR_SENSOR3_RECOVERY);
-
-    mb.addIsts(DI_INSTRUMENT_NODE_READY);
-    mb.addIsts(DI_SENSOR1_VALID);
-    mb.addIsts(DI_SENSOR2_VALID);
-    mb.addIsts(DI_SENSORS_AGREE);
-    mb.addIsts(DI_TEMP_CANDIDATE_VALID);
-    mb.addIsts(DI_PHYSICAL_OUTPUT_PERMISSIVE);
-    mb.addIsts(DI_PHYSICAL_HEATER_OUTPUT);
-    mb.addIsts(DI_PHYSICAL_PLC_COMMS_OK);
-    mb.addIsts(DI_SENSOR3_VALID);
-    mb.addIsts(DI_SENSORS_AGREE_13);
-    mb.addIsts(DI_SENSORS_AGREE_23);
-    mb.addIsts(DI_VOTING_RESOLVED);
-
-    // Retain these addresses for a later physical-output build. In the
-    // current simulated build they are accepted but have no control effect.
-    mb.addCoil(COIL_PHYSICAL_HEATER_DEMAND, false);
-    mb.addHreg(HR_PHYSICAL_PLC_HEARTBEAT, 0);
-    mb.addHreg(HR_FAULT_MODE, NONE);
-
-    Serial.println("Three-channel DS18B20 redundant instrument node");
-}
-
-void startTemperatureConversion(unsigned long currentTime) {
-    sensor1.requestTemperatures();
-    sensor2.requestTemperatures();
-    sensor3.requestTemperatures();
-
-    temperatureRequestTime = currentTime;
-    temperatureConversionInProgress = true;
 }
 
 bool isDallasReadFailure(float temperature) {
@@ -406,14 +201,55 @@ bool isDallasReadFailure(float temperature) {
         ;
 }
 
+bool isFaultModeValid(uint16_t value) {
+    return value <= SENSOR2_SENSOR3_DISCONNECTED;
+}
+
 bool suppressAcquisitionForChannel(uint8_t channelNumber) {
     return
-        (channelNumber == 1 &&
-         activeFaultMode == SENSOR1_STALE_ACQUISITION) ||
-        (channelNumber == 2 &&
-         activeFaultMode == SENSOR2_STALE_ACQUISITION) ||
-        (channelNumber == 3 &&
-         activeFaultMode == SENSOR3_STALE_ACQUISITION);
+        (channelNumber == 1 && activeFaultMode == SENSOR1_STALE_ACQUISITION) ||
+        (channelNumber == 2 && activeFaultMode == SENSOR2_STALE_ACQUISITION) ||
+        (channelNumber == 3 && activeFaultMode == SENSOR3_STALE_ACQUISITION);
+}
+
+float boundedFaultRamp(float maximumOffset) {
+    float offset = (faultModeSample + 1) * PROCESS_RAMP_STEP_C;
+    if (offset > maximumOffset) {
+        offset = maximumOffset;
+    }
+    return offset;
+}
+
+void selectFaultMode() {
+    uint16_t requested = mb.Hreg(HR_FAULT_MODE);
+
+    if (!isFaultModeValid(requested)) {
+        requested = NONE;
+        mb.Hreg(HR_FAULT_MODE, NONE);
+    }
+
+    FaultMode requestedMode = static_cast<FaultMode>(requested);
+    if (requestedMode == activeFaultMode) {
+        return;
+    }
+
+    activeFaultMode = requestedMode;
+    faultModeSample = 0;
+    frozenSensor1 = acquiredTemperature1;
+    frozenSensor2 = acquiredTemperature2;
+    frozenSensor3 = acquiredTemperature3;
+
+    Serial.print("Fault mode changed to ");
+    Serial.println((uint16_t)activeFaultMode);
+}
+
+void startTemperatureConversion(unsigned long currentTime) {
+    sensor1.requestTemperatures();
+    sensor2.requestTemperatures();
+    sensor3.requestTemperatures();
+
+    temperatureRequestTime = currentTime;
+    temperatureConversionInProgress = true;
 }
 
 void acquireTemperatureChannel(
@@ -425,9 +261,6 @@ void acquireTemperatureChannel(
 ) {
     channel.acquisitionSucceededThisCycle = false;
 
-    // Stale injection suppresses the normal read/refresh event. It does not
-    // assign channel state; freshness expires through the normal timestamp
-    // comparison in updateChannelHealth().
     if (suppressAcquisitionForChannel(channelNumber)) {
         return;
     }
@@ -435,17 +268,14 @@ void acquireTemperatureChannel(
     float reading = sensor.getTempCByIndex(0);
     acquiredTemperature = reading;
 
-    // getTempCByIndex() reads the scratchpad and validates its CRC. A Dallas
-    // failure sentinel means no successful acquisition event occurred.
     if (!isDallasReadFailure(reading)) {
         channel.acquisitionSucceededThisCycle = true;
         channel.hasSuccessfulAcquisition = true;
         channel.lastSuccessfulAcquisitionTime = currentTime;
-        channel.successfulAcquisitionSequence++;
     }
 }
 
-void finishInputRead(unsigned long currentTime) {
+void finishTemperatureRead(unsigned long currentTime) {
     acquireTemperatureChannel(
         sensor1,
         acquiredTemperature1,
@@ -468,135 +298,12 @@ void finishInputRead(unsigned long currentTime) {
         currentTime
     );
 
-    potValue = analogRead(POT_PIN);
-
     temperatureConversionInProgress = false;
 }
 
-bool isFaultModeValid(uint16_t modeValue) {
-    return modeValue <= SENSOR2_SENSOR3_DISCONNECTED;
-}
-
-const char* faultModeToString(FaultMode mode) {
-    switch (mode) {
-        case NONE:
-            return "NONE";
-        case SENSOR1_DISCONNECTED:
-            return "SENSOR1_DISCONNECTED";
-        case SENSOR2_DISCONNECTED:
-            return "SENSOR2_DISCONNECTED";
-        case BOTH_SENSORS_DISCONNECTED:
-            return "BOTH_SENSORS_DISCONNECTED";
-        case SENSOR1_BIAS:
-            return "SENSOR1_BIAS";
-        case SENSOR2_BIAS:
-            return "SENSOR2_BIAS";
-        case SENSOR1_STUCK:
-            return "SENSOR1_STUCK";
-        case SENSOR2_STUCK:
-            return "SENSOR2_STUCK";
-        case TEMPORARY_DISAGREEMENT:
-            return "TEMPORARY_DISAGREEMENT";
-        case PERSISTENT_DISAGREEMENT:
-            return "PERSISTENT_DISAGREEMENT";
-        case COMMON_PROCESS_CHANGE:
-            return "COMMON_PROCESS_CHANGE";
-        case SENSOR1_DRIFT:
-            return "SENSOR1_DRIFT";
-        case SENSOR3_DISCONNECTED:
-            return "SENSOR3_DISCONNECTED";
-        case SENSOR3_BIAS:
-            return "SENSOR3_BIAS";
-        case SENSOR3_STUCK:
-            return "SENSOR3_STUCK";
-        case SENSOR3_DISCONNECTED_SENSOR1_BIAS:
-            return "SENSOR3_DISCONNECTED_SENSOR1_BIAS";
-        case THREE_WAY_DISAGREEMENT:
-            return "THREE_WAY_DISAGREEMENT";
-        case ALL_SENSORS_DISCONNECTED:
-            return "ALL_SENSORS_DISCONNECTED";
-        case SENSOR1_OUT_OF_RANGE:
-            return "SENSOR1_OUT_OF_RANGE";
-        case SENSOR2_OUT_OF_RANGE:
-            return "SENSOR2_OUT_OF_RANGE";
-        case SENSOR3_OUT_OF_RANGE:
-            return "SENSOR3_OUT_OF_RANGE";
-        case SENSOR1_STALE_ACQUISITION:
-            return "SENSOR1_STALE_ACQUISITION";
-        case SENSOR2_STALE_ACQUISITION:
-            return "SENSOR2_STALE_ACQUISITION";
-        case SENSOR3_STALE_ACQUISITION:
-            return "SENSOR3_STALE_ACQUISITION";
-        case SENSOR1_DISCONNECTED_SENSOR2_BIAS:
-            return "SENSOR1_DISCONNECTED_SENSOR2_BIAS";
-        case SENSOR1_DISCONNECTED_SENSOR2_STUCK:
-            return "SENSOR1_DISCONNECTED_SENSOR2_STUCK";
-        case SENSOR1_OUT_OF_RANGE_SENSOR3_BIAS:
-            return "SENSOR1_OUT_OF_RANGE_SENSOR3_BIAS";
-        case SENSOR1_SENSOR2_CORRELATED_BIAS:
-            return "SENSOR1_SENSOR2_CORRELATED_BIAS";
-        case SENSOR2_SENSOR3_CORRELATED_BIAS:
-            return "SENSOR2_SENSOR3_CORRELATED_BIAS";
-        case SENSOR1_SENSOR2_CORRELATED_STUCK:
-            return "SENSOR1_SENSOR2_CORRELATED_STUCK";
-        case SENSOR1_SENSOR2_CORRELATED_DRIFT:
-            return "SENSOR1_SENSOR2_CORRELATED_DRIFT";
-        case SENSOR1_HIGH_SENSOR2_LOW:
-            return "SENSOR1_HIGH_SENSOR2_LOW";
-        case SENSOR1_SENSOR3_DISCONNECTED:
-            return "SENSOR1_SENSOR3_DISCONNECTED";
-        case SENSOR2_SENSOR3_DISCONNECTED:
-            return "SENSOR2_SENSOR3_DISCONNECTED";
-        default:
-            return "INVALID";
-    }
-}
-
-float boundedFaultRamp(float maximumOffset) {
-    float offset =
-        (faultModeSample + 1)
-        * PROCESS_RAMP_STEP_C;
-
-    if (offset > maximumOffset) {
-        offset = maximumOffset;
-    }
-
-    return offset;
-}
-
-void selectFaultMode() {
-    uint16_t requestedValue =
-        mb.Hreg(HR_FAULT_MODE);
-
-    if (!isFaultModeValid(requestedValue)) {
-        Serial.print("Invalid fault mode ");
-        Serial.print(requestedValue);
-        Serial.println("; restoring NONE");
-
-        requestedValue = NONE;
-        mb.Hreg(HR_FAULT_MODE, NONE);
-    }
-
-    FaultMode requestedMode =
-        static_cast<FaultMode>(requestedValue);
-
-    if (requestedMode == activeFaultMode) {
-        return;
-    }
-
-    activeFaultMode = requestedMode;
-    faultModeSample = 0;
-    frozenSensor1 = acquiredTemperature1;
-    frozenSensor2 = acquiredTemperature2;
-    frozenSensor3 = acquiredTemperature3;
-
-    Serial.print("Fault mode changed to ");
-    Serial.println(faultModeToString(activeFaultMode));
-}
-
 void applyFaultInjection() {
-    // Every cycle begins with fresh acquisition. Test modes modify only
-    // these effective measurements; diagnostics are never set directly.
+    // Test modes modify only the effective measurement stream.
+    // They never directly force a published health state.
     temperature1 = acquiredTemperature1;
     temperature2 = acquiredTemperature2;
     temperature3 = acquiredTemperature3;
@@ -628,57 +335,36 @@ void applyFaultInjection() {
 
         case SENSOR1_STUCK:
             temperature1 = frozenSensor1;
-            temperature2 +=
-                boundedFaultRamp(
-                    COMMON_PROCESS_MAX_OFFSET_C
-                );
-            temperature3 +=
-                boundedFaultRamp(
-                    COMMON_PROCESS_MAX_OFFSET_C
-                );
+            temperature2 += boundedFaultRamp(COMMON_PROCESS_MAX_OFFSET_C);
+            temperature3 += boundedFaultRamp(COMMON_PROCESS_MAX_OFFSET_C);
             break;
 
         case SENSOR2_STUCK:
-            temperature1 +=
-                boundedFaultRamp(
-                    COMMON_PROCESS_MAX_OFFSET_C
-                );
+            temperature1 += boundedFaultRamp(COMMON_PROCESS_MAX_OFFSET_C);
             temperature2 = frozenSensor2;
-            temperature3 +=
-                boundedFaultRamp(
-                    COMMON_PROCESS_MAX_OFFSET_C
-                );
+            temperature3 += boundedFaultRamp(COMMON_PROCESS_MAX_OFFSET_C);
             break;
 
         case TEMPORARY_DISAGREEMENT:
             if (faultModeSample == 0) {
-                temperature1 +=
-                    DISAGREEMENT_OFFSET_C;
+                temperature1 += DISAGREEMENT_OFFSET_C;
             }
             break;
 
         case PERSISTENT_DISAGREEMENT:
-            temperature1 +=
-                DISAGREEMENT_OFFSET_C;
+            temperature1 += DISAGREEMENT_OFFSET_C;
             break;
 
         case COMMON_PROCESS_CHANGE: {
-            float processOffset =
-                boundedFaultRamp(
-                    COMMON_PROCESS_MAX_OFFSET_C
-                );
-
-            temperature1 += processOffset;
-            temperature2 += processOffset;
-            temperature3 += processOffset;
+            float offset = boundedFaultRamp(COMMON_PROCESS_MAX_OFFSET_C);
+            temperature1 += offset;
+            temperature2 += offset;
+            temperature3 += offset;
             break;
         }
 
         case SENSOR1_DRIFT:
-            temperature1 +=
-                boundedFaultRamp(
-                    DRIFT_MAX_OFFSET_C
-                );
+            temperature1 += boundedFaultRamp(DRIFT_MAX_OFFSET_C);
             break;
 
         case SENSOR3_DISCONNECTED:
@@ -690,14 +376,8 @@ void applyFaultInjection() {
             break;
 
         case SENSOR3_STUCK:
-            temperature1 +=
-                boundedFaultRamp(
-                    COMMON_PROCESS_MAX_OFFSET_C
-                );
-            temperature2 +=
-                boundedFaultRamp(
-                    COMMON_PROCESS_MAX_OFFSET_C
-                );
+            temperature1 += boundedFaultRamp(COMMON_PROCESS_MAX_OFFSET_C);
+            temperature2 += boundedFaultRamp(COMMON_PROCESS_MAX_OFFSET_C);
             temperature3 = frozenSensor3;
             break;
 
@@ -732,9 +412,7 @@ void applyFaultInjection() {
         case SENSOR1_STALE_ACQUISITION:
         case SENSOR2_STALE_ACQUISITION:
         case SENSOR3_STALE_ACQUISITION:
-            // The corresponding acquisition was suppressed before this
-            // boundary. Keeping the last value here lets freshness—not
-            // numerical change—exclude the channel after the timeout.
+            // Acquisition suppression already happened before this point.
             break;
 
         case SENSOR1_DISCONNECTED_SENSOR2_BIAS:
@@ -745,10 +423,7 @@ void applyFaultInjection() {
         case SENSOR1_DISCONNECTED_SENSOR2_STUCK:
             temperature1 = DEVICE_DISCONNECTED_C;
             temperature2 = frozenSensor2;
-            temperature3 +=
-                boundedFaultRamp(
-                    COMMON_PROCESS_MAX_OFFSET_C
-                );
+            temperature3 += boundedFaultRamp(COMMON_PROCESS_MAX_OFFSET_C);
             break;
 
         case SENSOR1_OUT_OF_RANGE_SENSOR3_BIAS:
@@ -769,20 +444,13 @@ void applyFaultInjection() {
         case SENSOR1_SENSOR2_CORRELATED_STUCK:
             temperature1 = frozenSensor1;
             temperature2 = frozenSensor2;
-            temperature3 +=
-                boundedFaultRamp(
-                    COMMON_PROCESS_MAX_OFFSET_C
-                );
+            temperature3 += boundedFaultRamp(COMMON_PROCESS_MAX_OFFSET_C);
             break;
 
         case SENSOR1_SENSOR2_CORRELATED_DRIFT: {
-            float correlatedDrift =
-                boundedFaultRamp(
-                    DRIFT_MAX_OFFSET_C
-                );
-
-            temperature1 += correlatedDrift;
-            temperature2 += correlatedDrift;
+            float drift = boundedFaultRamp(DRIFT_MAX_OFFSET_C);
+            temperature1 += drift;
+            temperature2 += drift;
             break;
         }
 
@@ -805,13 +473,25 @@ void applyFaultInjection() {
     faultModeSample++;
 }
 
+void setPrimaryHealthFault(
+    ChannelHealth& channel,
+    ChannelHealthState state
+) {
+    channel.state = state;
+    channel.qualificationCount = 0;
+    channel.stuckClearCount = 0;
+
+    if (channel.everQualified) {
+        channel.recoveryRequired = true;
+    }
+}
+
 void updateChannelHealth(
     ChannelHealth& channel,
     float effectiveTemperature,
     unsigned long currentTime
 ) {
-    channel.readHealthy =
-        !isDallasReadFailure(effectiveTemperature);
+    channel.readHealthy = !isDallasReadFailure(effectiveTemperature);
     channel.rangeValid =
         channel.readHealthy &&
         effectiveTemperature >= CHANNEL_MIN_TEMPERATURE_C &&
@@ -821,42 +501,56 @@ void updateChannelHealth(
         currentTime - channel.lastSuccessfulAcquisitionTime <=
             CHANNEL_STALE_TIMEOUT_MS;
 
+    // Deterministic dominant priority:
+    // READ_FAILURE > OUT_OF_RANGE > STALE > STUCK > RECOVERING/NOT_READY > HEALTHY.
     if (!channel.readHealthy) {
-        channel.state = CHANNEL_READ_FAILURE;
-        channel.usableForVoting = false;
-        channel.recoveryRequired = true;
-        channel.recoveryCount = 0;
+        setPrimaryHealthFault(channel, CHANNEL_READ_FAILURE);
         return;
     }
 
     if (!channel.rangeValid) {
-        channel.state = CHANNEL_OUT_OF_RANGE;
-        channel.usableForVoting = false;
-        channel.recoveryRequired = true;
-        channel.recoveryCount = 0;
+        setPrimaryHealthFault(channel, CHANNEL_OUT_OF_RANGE);
         return;
     }
 
     if (!channel.fresh) {
-        channel.state = CHANNEL_STALE;
-        channel.usableForVoting = false;
-        channel.recoveryRequired = true;
-        channel.recoveryCount = 0;
+        setPrimaryHealthFault(channel, CHANNEL_STALE);
+        return;
+    }
+
+    if (channel.stuckLatched) {
+        channel.state = CHANNEL_STUCK;
+        channel.qualificationCount = 0;
+        return;
+    }
+
+    if (!channel.everQualified) {
+        channel.state = CHANNEL_NOT_READY;
+
+        if (channel.acquisitionSucceededThisCycle) {
+            channel.qualificationCount++;
+        }
+
+        if (channel.qualificationCount >= CHANNEL_QUALIFICATION_SAMPLES) {
+            channel.qualificationCount = CHANNEL_QUALIFICATION_SAMPLES;
+            channel.everQualified = true;
+            channel.recoveryRequired = false;
+            channel.state = CHANNEL_HEALTHY;
+        }
+
         return;
     }
 
     if (channel.recoveryRequired) {
         channel.state = CHANNEL_RECOVERING;
-        channel.usableForVoting = false;
 
         if (channel.acquisitionSucceededThisCycle) {
-            channel.recoveryCount++;
+            channel.qualificationCount++;
         }
 
-        if (channel.recoveryCount >= CHANNEL_RECOVERY_SAMPLES) {
-            channel.recoveryCount = CHANNEL_RECOVERY_SAMPLES;
+        if (channel.qualificationCount >= CHANNEL_RECOVERY_SAMPLES) {
+            channel.qualificationCount = CHANNEL_RECOVERY_SAMPLES;
             channel.recoveryRequired = false;
-            channel.usableForVoting = true;
             channel.state = CHANNEL_HEALTHY;
         }
 
@@ -864,601 +558,80 @@ void updateChannelHealth(
     }
 
     channel.state = CHANNEL_HEALTHY;
-    channel.usableForVoting = true;
-    channel.recoveryCount = CHANNEL_RECOVERY_SAMPLES;
+    channel.qualificationCount = CHANNEL_RECOVERY_SAMPLES;
 }
 
-void runDiagnostics(unsigned long currentTime) {
-    updateChannelHealth(
-        channel1Health,
-        temperature1,
-        currentTime
-    );
-    updateChannelHealth(
-        channel2Health,
-        temperature2,
-        currentTime
-    );
-    updateChannelHealth(
-        channel3Health,
-        temperature3,
-        currentTime
-    );
-
-    sensor1Valid = channel1Health.usableForVoting;
-    sensor2Valid = channel2Health.usableForVoting;
-    sensor3Valid = channel3Health.usableForVoting;
-
-    validSensorCount =
-        (sensor1Valid ? 1 : 0) +
-        (sensor2Valid ? 1 : 0) +
-        (sensor3Valid ? 1 : 0);
-
-    sensorDifference12 = sensor1Valid && sensor2Valid
-        ? abs(temperature1 - temperature2)
-        : 0.0;
-    sensorDifference13 = sensor1Valid && sensor3Valid
-        ? abs(temperature1 - temperature3)
-        : 0.0;
-    sensorDifference23 = sensor2Valid && sensor3Valid
-        ? abs(temperature2 - temperature3)
-        : 0.0;
-
-    sensorsAgree12 =
-        sensor1Valid && sensor2Valid &&
-        sensorDifference12 <= SENSOR_AGREEMENT_TOLERANCE_C;
-    sensorsAgree13 =
-        sensor1Valid && sensor3Valid &&
-        sensorDifference13 <= SENSOR_AGREEMENT_TOLERANCE_C;
-    sensorsAgree23 =
-        sensor2Valid && sensor3Valid &&
-        sensorDifference23 <= SENSOR_AGREEMENT_TOLERANCE_C;
-
-    agreeingPairCount =
-        (sensorsAgree12 ? 1 : 0) +
-        (sensorsAgree13 ? 1 : 0) +
-        (sensorsAgree23 ? 1 : 0);
-
-    allThreeSensorsAgree =
-        validSensorCount == 3 &&
-        agreeingPairCount == 3;
-
-    isolatedSensor = 0;
-    if (validSensorCount == 3 && agreeingPairCount == 1) {
-        if (sensorsAgree23) {
-            isolatedSensor = 1;
-        }
-        else if (sensorsAgree13) {
-            isolatedSensor = 2;
-        }
-        else if (sensorsAgree12) {
-            isolatedSensor = 3;
-        }
-    }
-
-    votingStatus = VOTE_UNRESOLVED;
-    if (allThreeSensorsAgree) {
-        votingStatus = VOTE_ALL_THREE;
-    }
-    else if (validSensorCount == 3 && isolatedSensor != 0) {
-        votingStatus = isolatedSensor == 1
-            ? VOTE_PAIR_23
-            : isolatedSensor == 2
-                ? VOTE_PAIR_13
-                : VOTE_PAIR_12;
-    }
-    else if (validSensorCount == 2) {
-        if (sensorsAgree12) {
-            votingStatus = VOTE_PAIR_12;
-        }
-        else if (sensorsAgree13) {
-            votingStatus = VOTE_PAIR_13;
-        }
-        else if (sensorsAgree23) {
-            votingStatus = VOTE_PAIR_23;
-        }
-    }
-    else if (validSensorCount == 1) {
-        votingStatus = sensor1Valid
-            ? VOTE_SINGLE_1
-            : sensor2Valid
-                ? VOTE_SINGLE_2
-                : VOTE_SINGLE_3;
-    }
-
-    agreeingPairAvailable =
-        votingStatus == VOTE_PAIR_12 ||
-        votingStatus == VOTE_PAIR_13 ||
-        votingStatus == VOTE_PAIR_23;
-
-    unresolvedDisagreement =
-        validSensorCount >= 2 &&
-        votingStatus == VOTE_UNRESOLVED;
-
-    if (unresolvedDisagreement) {
-        disagreementGoodCount = 0;
-
-        if (!sensorDisagreementConfirmed) {
-            disagreementBadCount++;
-            disagreementPending = true;
-
-            if (
-                disagreementBadCount >=
-                DISAGREEMENT_CONFIRM_SAMPLES
-            ) {
-                sensorDisagreementConfirmed = true;
-                disagreementPending = false;
-            }
-        }
-    }
-    else {
-        disagreementBadCount = 0;
-        disagreementPending = false;
-
-        if (sensorDisagreementConfirmed) {
-            disagreementGoodCount++;
-
-            if (
-                disagreementGoodCount >=
-                DISAGREEMENT_CLEAR_SAMPLES
-            ) {
-                sensorDisagreementConfirmed = false;
-                disagreementGoodCount = 0;
-            }
-        }
-        else {
-            disagreementGoodCount = 0;
-        }
-    }
+bool baseEvidenceHealthy(const ChannelHealth& channel) {
+    return channel.readHealthy && channel.rangeValid && channel.fresh;
 }
 
-void updateDiagnosticTemperatureCandidate() {
-    diagnosticTempCandidateValid = false;
-
-    if (sensorDisagreementConfirmed) {
-        diagnosticTempCandidate = NAN;
-        diagnosticTempCandidateValid = false;
-    }
-    else if (
-        unresolvedDisagreement &&
-        disagreementPending &&
-        !isnan(lastDiagnosticTempCandidate)
-    ) {
-        diagnosticTempCandidate = lastDiagnosticTempCandidate;
-        diagnosticTempCandidateValid = true;
-    }
-    else {
-        switch (votingStatus) {
-            case VOTE_ALL_THREE:
-                diagnosticTempCandidate =
-                    (temperature1 + temperature2 + temperature3) /
-                    3.0;
-                diagnosticTempCandidateValid = true;
-                break;
-            case VOTE_PAIR_12:
-                diagnosticTempCandidate =
-                    (temperature1 + temperature2) / 2.0;
-                diagnosticTempCandidateValid = true;
-                break;
-            case VOTE_PAIR_13:
-                diagnosticTempCandidate =
-                    (temperature1 + temperature3) / 2.0;
-                diagnosticTempCandidateValid = true;
-                break;
-            case VOTE_PAIR_23:
-                diagnosticTempCandidate =
-                    (temperature2 + temperature3) / 2.0;
-                diagnosticTempCandidateValid = true;
-                break;
-            case VOTE_SINGLE_1:
-                diagnosticTempCandidate = temperature1;
-                diagnosticTempCandidateValid = true;
-                break;
-            case VOTE_SINGLE_2:
-                diagnosticTempCandidate = temperature2;
-                diagnosticTempCandidateValid = true;
-                break;
-            case VOTE_SINGLE_3:
-                diagnosticTempCandidate = temperature3;
-                diagnosticTempCandidateValid = true;
-                break;
-            default:
-                diagnosticTempCandidate = NAN;
-                diagnosticTempCandidateValid = false;
-                break;
-        }
-
-        if (diagnosticTempCandidateValid) {
-            lastDiagnosticTempCandidate =
-                diagnosticTempCandidate;
-        }
-    }
+bool allThreeTemperaturesAgree() {
+    return
+        fabsf(temperature1 - temperature2) <= STUCK_CORROBORATION_TOLERANCE_C &&
+        fabsf(temperature1 - temperature3) <= STUCK_CORROBORATION_TOLERANCE_C &&
+        fabsf(temperature2 - temperature3) <= STUCK_CORROBORATION_TOLERANCE_C;
 }
 
-void updateDiagnosticsStatus() {
-    // Priority: loss of all measurements, unresolved disagreement,
-    // corroborated stuck isolation, 2-out-of-3 outlier isolation,
-    // healthy/degraded explicit-validity states.
-    if (validSensorCount == 0) {
-        diagnosticStatus = NO_VALID_SENSOR;
-    }
-    else if (sensorDisagreementConfirmed) {
-        diagnosticStatus = SENSOR_DISAGREEMENT;
-    }
-    else if (disagreementPending) {
-        diagnosticStatus = SENSOR_DISAGREEMENT_PENDING;
-    }
-    else if (sensor1Stuck) {
-        diagnosticStatus = SENSOR_1_STUCK;
-    }
-    else if (sensor2Stuck) {
-        diagnosticStatus = SENSOR_2_STUCK;
-    }
-    else if (sensor3Stuck) {
-        diagnosticStatus = SENSOR_3_STUCK;
-    }
-    else if (isolatedSensor == 1) {
-        diagnosticStatus = SENSOR_1_OUTLIER;
-    }
-    else if (isolatedSensor == 2) {
-        diagnosticStatus = SENSOR_2_OUTLIER;
-    }
-    else if (isolatedSensor == 3) {
-        diagnosticStatus = SENSOR_3_OUTLIER;
-    }
-    else if (validSensorCount == 3 && allThreeSensorsAgree) {
-        diagnosticStatus = ALL_THREE_SENSORS_VALID;
-    }
-    else if (validSensorCount == 2 && agreeingPairAvailable) {
-        diagnosticStatus = !sensor1Valid
-            ? SENSOR_1_FAULT
-            : !sensor2Valid
-                ? SENSOR_2_FAULT
-                : SENSOR_3_FAULT;
-    }
-    else if (validSensorCount == 1) {
-        diagnosticStatus = INSUFFICIENT_REDUNDANCY;
-    }
-    else {
-        diagnosticStatus = SENSOR_DISAGREEMENT_PENDING;
-    }
-}
-
-#if ENABLE_PHYSICAL_HEATER_OUTPUT
-void checkPhysicalPLCHeartbeat(
-    unsigned long currentTime
-) {
-    uint16_t currentHeartbeat =
-        mb.Hreg(HR_PHYSICAL_PLC_HEARTBEAT);
-
-    if (
-        currentHeartbeat
-        != lastPhysicalPlcHeartbeat
-    ) {
-        lastPhysicalPlcHeartbeat =
-            currentHeartbeat;
-
-        lastPhysicalPlcHeartbeatTime =
-            currentTime;
-
-        physicalPlcCommsOK = true;
+void evaluateOneStuckRecovery(ChannelHealth& channel) {
+    if (!channel.stuckLatched) {
+        channel.stuckClearCount = 0;
+        return;
     }
 
     if (
-        physicalPlcCommsOK &&
-        currentTime - lastPhysicalPlcHeartbeatTime
-            > PHYSICAL_PLC_COMMS_TIMEOUT
+        baseEvidenceHealthy(channel1Health) &&
+        baseEvidenceHealthy(channel2Health) &&
+        baseEvidenceHealthy(channel3Health) &&
+        allThreeTemperaturesAgree()
     ) {
-        physicalPlcCommsOK = false;
-    }
-}
+        channel.stuckClearCount++;
 
-void readPhysicalOutputCommand() {
-    physicalHeaterDemand =
-        mb.Coil(COIL_PHYSICAL_HEATER_DEMAND);
-}
-
-void updatePhysicalHeaterOutput() {
-    // The PLC owns every process permissive and demand decision. This local
-    // layer only rejects an expired command channel before driving hardware.
-    physicalOutputPermissive = physicalPlcCommsOK;
-    physicalHeaterOutput =
-        physicalOutputPermissive &&
-        physicalHeaterDemand;
-    digitalWrite(
-        LED_PIN,
-        physicalHeaterOutput ? HIGH : LOW
-    );
-}
-#endif
-
-void filterInputs() {
-    if (!filterInitialized) {
-        filteredPotValue = potValue;
-        filterInitialized = true;
+        if (channel.stuckClearCount >= STUCK_CLEAR_SAMPLES) {
+            channel.stuckLatched = false;
+            channel.stuckReferenceTemperature = NAN;
+            channel.stuckClearCount = 0;
+            channel.recoveryRequired = true;
+            channel.qualificationCount = 0;
+            channel.state = CHANNEL_RECOVERING;
+        }
     }
     else {
-        filteredPotValue =
-            FILTER_ALPHA * potValue +
-            (1.0 - FILTER_ALPHA)
-            * filteredPotValue;
+        channel.stuckClearCount = 0;
     }
 }
 
-void ADCscaling() {
-    scaled_ADC =
-        (filteredPotValue / 4095.0)
-        * 100.0;
+void evaluateStuckRecovery() {
+    evaluateOneStuckRecovery(channel1Health);
+    evaluateOneStuckRecovery(channel2Health);
+    evaluateOneStuckRecovery(channel3Health);
 }
 
-const char* diagnosticStatusToString() {
-    switch (diagnosticStatus) {
-        case ALL_THREE_SENSORS_VALID:
-            return "ALL_THREE_SENSORS_VALID";
-
-        case SENSOR_1_FAULT:
-            return "SENSOR_1_FAULT";
-
-        case SENSOR_2_FAULT:
-            return "SENSOR_2_FAULT";
-
-        case SENSOR_DISAGREEMENT:
-            return "SENSOR_DISAGREEMENT";
-
-        case NO_VALID_SENSOR:
-            return "NO_VALID_SENSOR";
-
-        case SENSOR_1_STUCK:
-            return "SENSOR_1_STUCK";
-
-        case SENSOR_2_STUCK:
-            return "SENSOR_2_STUCK";
-
-        case SENSOR_DISAGREEMENT_PENDING:
-            return "SENSOR_DISAGREEMENT_PENDING";
-
-        case SENSOR_3_FAULT:
-            return "SENSOR_3_FAULT";
-
-        case SENSOR_1_OUTLIER:
-            return "SENSOR_1_OUTLIER";
-
-        case SENSOR_2_OUTLIER:
-            return "SENSOR_2_OUTLIER";
-
-        case SENSOR_3_OUTLIER:
-            return "SENSOR_3_OUTLIER";
-
-        case SENSOR_3_STUCK:
-            return "SENSOR_3_STUCK";
-
-        case INSUFFICIENT_REDUNDANCY:
-            return "INSUFFICIENT_REDUNDANCY";
-
-        default:
-            return "UNKNOWN";
-    }
+void latchStuck(ChannelHealth& channel, float temperature) {
+    channel.stuckLatched = true;
+    channel.stuckReferenceTemperature = temperature;
+    channel.stuckClearCount = 0;
+    channel.qualificationCount = 0;
+    channel.recoveryRequired = true;
+    channel.state = CHANNEL_STUCK;
 }
 
-void updateModbusInputRegisters() {
-    uint16_t temp1Modbus = sensor1Valid
-        ? (uint16_t)round(temperature1 * 100.0)
-        : MODBUS_INVALID_VALUE;
-
-    uint16_t temp2Modbus = sensor2Valid
-        ? (uint16_t)round(temperature2 * 100.0)
-        : MODBUS_INVALID_VALUE;
-
-    uint16_t temp3Modbus = sensor3Valid
-        ? (uint16_t)round(temperature3 * 100.0)
-        : MODBUS_INVALID_VALUE;
-
-    uint16_t tempCandidateModbus;
-    if (diagnosticTempCandidateValid) {
-        tempCandidateModbus =
-            (uint16_t)
-            round(diagnosticTempCandidate * 100.0);
-    }
-    else {
-        tempCandidateModbus = MODBUS_INVALID_VALUE;
-    }
-
-    uint16_t sensorDiff12Modbus = sensor1Valid && sensor2Valid
-        ? (uint16_t)round(sensorDifference12 * 100.0)
-        : MODBUS_INVALID_VALUE;
-
-    uint16_t sensorDiff13Modbus = sensor1Valid && sensor3Valid
-        ? (uint16_t)round(sensorDifference13 * 100.0)
-        : MODBUS_INVALID_VALUE;
-
-    uint16_t sensorDiff23Modbus = sensor2Valid && sensor3Valid
-        ? (uint16_t)round(sensorDifference23 * 100.0)
-        : MODBUS_INVALID_VALUE;
-
-    uint16_t potScaledModbus =
-        (uint16_t)
-        round(scaled_ADC * 10.0);
-
-    esp32Heartbeat++;
-
-    mb.Ireg(
-        IR_TEMP1,
-        temp1Modbus
-    );
-
-    mb.Ireg(
-        IR_TEMP2,
-        temp2Modbus
-    );
-
-    mb.Ireg(
-        IR_ESP32_TEMP_CANDIDATE,
-        tempCandidateModbus
-    );
-
-    mb.Ireg(
-        IR_SENSOR_DIFF,
-        sensorDiff12Modbus
-    );
-
-    mb.Ireg(
-        IR_POT_RAW,
-        potValue
-    );
-
-    mb.Ireg(
-        IR_POT_SCALED,
-        potScaledModbus
-    );
-
-    mb.Ireg(
-        IR_DIAGNOSTIC_STATUS,
-        (uint16_t)diagnosticStatus
-    );
-
-    mb.Ireg(
-        IR_LEGACY_PROCESS_STATE,
-        MODBUS_INVALID_VALUE
-    );
-
-    mb.Ireg(
-        IR_ESP32_HEARTBEAT,
-        esp32Heartbeat
-    );
-
-    mb.Ireg(
-        IR_TEMP3,
-        temp3Modbus
-    );
-
-    mb.Ireg(
-        IR_SENSOR_DIFF_13,
-        sensorDiff13Modbus
-    );
-
-    mb.Ireg(
-        IR_SENSOR_DIFF_23,
-        sensorDiff23Modbus
-    );
-
-    mb.Ireg(
-        IR_VOTING_STATUS,
-        (uint16_t)votingStatus
-    );
-
-    mb.Ireg(
-        IR_SENSOR1_HEALTH,
-        (uint16_t)channel1Health.state
-    );
-
-    mb.Ireg(
-        IR_SENSOR2_HEALTH,
-        (uint16_t)channel2Health.state
-    );
-
-    mb.Ireg(
-        IR_SENSOR3_HEALTH,
-        (uint16_t)channel3Health.state
-    );
-
-    mb.Ireg(
-        IR_SENSOR1_RECOVERY,
-        channel1Health.recoveryCount
-    );
-
-    mb.Ireg(
-        IR_SENSOR2_RECOVERY,
-        channel2Health.recoveryCount
-    );
-
-    mb.Ireg(
-        IR_SENSOR3_RECOVERY,
-        channel3Health.recoveryCount
-    );
-}
-
-void updateModbusDiscreteInputs() {
-    mb.Ists(
-        DI_INSTRUMENT_NODE_READY,
-        instrumentNodeReady
-    );
-
-    mb.Ists(
-        DI_SENSOR1_VALID,
-        sensor1Valid
-    );
-
-    mb.Ists(
-        DI_SENSOR2_VALID,
-        sensor2Valid
-    );
-
-    mb.Ists(
-        DI_SENSORS_AGREE,
-        sensorsAgree12
-    );
-
-    mb.Ists(
-        DI_TEMP_CANDIDATE_VALID,
-        diagnosticTempCandidateValid
-    );
-
-#if ENABLE_PHYSICAL_HEATER_OUTPUT
-    mb.Ists(
-        DI_PHYSICAL_OUTPUT_PERMISSIVE,
-        physicalOutputPermissive
-    );
-
-    mb.Ists(
-        DI_PHYSICAL_HEATER_OUTPUT,
-        physicalHeaterOutput
-    );
-
-    mb.Ists(
-        DI_PHYSICAL_PLC_COMMS_OK,
-        physicalPlcCommsOK
-    );
-#else
-    mb.Ists(DI_PHYSICAL_OUTPUT_PERMISSIVE, false);
-    mb.Ists(DI_PHYSICAL_HEATER_OUTPUT, false);
-    mb.Ists(DI_PHYSICAL_PLC_COMMS_OK, false);
-#endif
-
-    mb.Ists(
-        DI_SENSOR3_VALID,
-        sensor3Valid
-    );
-
-    mb.Ists(
-        DI_SENSORS_AGREE_13,
-        sensorsAgree13
-    );
-
-    mb.Ists(
-        DI_SENSORS_AGREE_23,
-        sensorsAgree23
-    );
-
-    mb.Ists(
-        DI_VOTING_RESOLVED,
-        votingStatus != VOTE_UNRESOLVED
-    );
+void resetStuckWindow() {
+    stuckWindowStartT1 = NAN;
+    stuckWindowStartT2 = NAN;
+    stuckWindowStartT3 = NAN;
+    stuckWindowSampleCount = 0;
 }
 
 void detectStuckSensors() {
-
-    if (!sensor1Valid || !sensor2Valid || !sensor3Valid) {
-
-        sensor1Stuck = false;
-        sensor2Stuck = false;
-        sensor3Stuck = false;
-
-        stuckWindowStartT1 = NAN;
-        stuckWindowStartT2 = NAN;
-        stuckWindowStartT3 = NAN;
-
-        stuckWindowSamples = 0;
-
+    // Only diagnose stuck behavior while all three channels are otherwise
+    // healthy. The corroborating pair is used only as acquisition evidence;
+    // no pair/vote result is exported to Modbus.
+    if (
+        channel1Health.state != CHANNEL_HEALTHY ||
+        channel2Health.state != CHANNEL_HEALTHY ||
+        channel3Health.state != CHANNEL_HEALTHY
+    ) {
+        resetStuckWindow();
         return;
     }
 
@@ -1467,195 +640,136 @@ void detectStuckSensors() {
         isnan(stuckWindowStartT2) ||
         isnan(stuckWindowStartT3)
     ) {
-
         stuckWindowStartT1 = temperature1;
         stuckWindowStartT2 = temperature2;
         stuckWindowStartT3 = temperature3;
-
-        stuckWindowSamples = 0;
-
+        stuckWindowSampleCount = 0;
         return;
     }
 
-    stuckWindowSamples++;
-
-    if (stuckWindowSamples < STUCK_WINDOW_SAMPLES) {
+    stuckWindowSampleCount++;
+    if (stuckWindowSampleCount < STUCK_WINDOW_SAMPLES) {
         return;
     }
 
-    float sensor1Delta = temperature1 - stuckWindowStartT1;
-    float sensor2Delta = temperature2 - stuckWindowStartT2;
-    float sensor3Delta = temperature3 - stuckWindowStartT3;
+    float delta1 = temperature1 - stuckWindowStartT1;
+    float delta2 = temperature2 - stuckWindowStartT2;
+    float delta3 = temperature3 - stuckWindowStartT3;
 
-    float sensor1Change = abs(sensor1Delta);
-    float sensor2Change = abs(sensor2Delta);
-    float sensor3Change = abs(sensor3Delta);
+    float change1 = fabsf(delta1);
+    float change2 = fabsf(delta2);
+    float change3 = fabsf(delta3);
 
-    bool sensors23MoveTogether =
-        sensorsAgree23 &&
-        sensor2Change >= PROCESS_CHANGE_MIN &&
-        sensor3Change >= PROCESS_CHANGE_MIN &&
-        abs(sensor2Delta - sensor3Delta) <=
-            SENSOR_AGREEMENT_TOLERANCE_C;
+    bool pair23CorroboratesMotion =
+        fabsf(temperature2 - temperature3) <= STUCK_CORROBORATION_TOLERANCE_C &&
+        change2 >= PROCESS_CHANGE_MIN_C &&
+        change3 >= PROCESS_CHANGE_MIN_C &&
+        fabsf(delta2 - delta3) <= STUCK_CORROBORATION_TOLERANCE_C;
 
-    bool sensors13MoveTogether =
-        sensorsAgree13 &&
-        sensor1Change >= PROCESS_CHANGE_MIN &&
-        sensor3Change >= PROCESS_CHANGE_MIN &&
-        abs(sensor1Delta - sensor3Delta) <=
-            SENSOR_AGREEMENT_TOLERANCE_C;
+    bool pair13CorroboratesMotion =
+        fabsf(temperature1 - temperature3) <= STUCK_CORROBORATION_TOLERANCE_C &&
+        change1 >= PROCESS_CHANGE_MIN_C &&
+        change3 >= PROCESS_CHANGE_MIN_C &&
+        fabsf(delta1 - delta3) <= STUCK_CORROBORATION_TOLERANCE_C;
 
-    bool sensors12MoveTogether =
-        sensorsAgree12 &&
-        sensor1Change >= PROCESS_CHANGE_MIN &&
-        sensor2Change >= PROCESS_CHANGE_MIN &&
-        abs(sensor1Delta - sensor2Delta) <=
-            SENSOR_AGREEMENT_TOLERANCE_C;
+    bool pair12CorroboratesMotion =
+        fabsf(temperature1 - temperature2) <= STUCK_CORROBORATION_TOLERANCE_C &&
+        change1 >= PROCESS_CHANGE_MIN_C &&
+        change2 >= PROCESS_CHANGE_MIN_C &&
+        fabsf(delta1 - delta2) <= STUCK_CORROBORATION_TOLERANCE_C;
 
-    sensor1Stuck =
-        sensor1Change <= STUCK_MAX_CHANGE &&
-        sensors23MoveTogether;
+    if (change1 <= STUCK_MAX_CHANGE_C && pair23CorroboratesMotion) {
+        latchStuck(channel1Health, temperature1);
+    }
 
-    sensor2Stuck =
-        sensor2Change <= STUCK_MAX_CHANGE &&
-        sensors13MoveTogether;
+    if (change2 <= STUCK_MAX_CHANGE_C && pair13CorroboratesMotion) {
+        latchStuck(channel2Health, temperature2);
+    }
 
-    sensor3Stuck =
-        sensor3Change <= STUCK_MAX_CHANGE &&
-        sensors12MoveTogether;
+    if (change3 <= STUCK_MAX_CHANGE_C && pair12CorroboratesMotion) {
+        latchStuck(channel3Health, temperature3);
+    }
 
     stuckWindowStartT1 = temperature1;
     stuckWindowStartT2 = temperature2;
     stuckWindowStartT3 = temperature3;
-
-    stuckWindowSamples = 0;
+    stuckWindowSampleCount = 0;
 }
 
-void logMeasurements(unsigned long timestamp) {
-    Serial.print("Fault mode: ");
-    Serial.println(faultModeToString(activeFaultMode));
-
-    if (activeFaultMode != NONE) {
-        Serial.print("Acquired temperatures: ");
-        Serial.print(acquiredTemperature1);
-        Serial.print(" C, ");
-        Serial.print(acquiredTemperature2);
-        Serial.print(" C, ");
-        Serial.print(acquiredTemperature3);
-        Serial.println(" C");
+uint16_t encodeTemperature(
+    float temperature,
+    const ChannelHealth& channel
+) {
+    if (channel.state != CHANNEL_HEALTHY) {
+        return MODBUS_INVALID_VALUE;
     }
 
+    return (uint16_t)roundf(temperature * 100.0f);
+}
+
+void publishModbusData() {
+    esp32Heartbeat++;
+
+    mb.Ireg(IR_TEMP1, encodeTemperature(temperature1, channel1Health));
+    mb.Ireg(IR_TEMP2, encodeTemperature(temperature2, channel2Health));
+    mb.Ireg(IR_TEMP3, encodeTemperature(temperature3, channel3Health));
+    mb.Ireg(IR_ESP32_HEARTBEAT, esp32Heartbeat);
+    mb.Ireg(IR_SENSOR1_HEALTH, (uint16_t)channel1Health.state);
+    mb.Ireg(IR_SENSOR2_HEALTH, (uint16_t)channel2Health.state);
+    mb.Ireg(IR_SENSOR3_HEALTH, (uint16_t)channel3Health.state);
+}
+
+void logCycle(unsigned long currentTime) {
     Serial.print("[");
-    Serial.print(timestamp);
-    Serial.print(" ms] Temperature 1: ");
+    Serial.print(currentTime);
+    Serial.print(" ms] fault=");
+    Serial.print((uint16_t)activeFaultMode);
+
+    Serial.print(" T1/T2/T3=");
     Serial.print(temperature1);
-    Serial.println(" C");
-
-    Serial.print("[");
-    Serial.print(timestamp);
-    Serial.print(" ms] Temperature 2: ");
+    Serial.print("/");
     Serial.print(temperature2);
-    Serial.println(" C");
-
-    Serial.print("[");
-    Serial.print(timestamp);
-    Serial.print(" ms] Temperature 3: ");
+    Serial.print("/");
     Serial.print(temperature3);
-    Serial.println(" C");
 
-    Serial.print("[");
-    Serial.print(timestamp);
-    Serial.print(" ms] Potentiometer RAW: ");
-    Serial.println(potValue);
-
-    Serial.print("[");
-    Serial.print(timestamp);
-    Serial.print(" ms] Potentiometer FILTERED: ");
-    Serial.println(filteredPotValue);
-
-    Serial.print("[");
-    Serial.print(timestamp);
-    Serial.print(" ms] Potentiometer SCALED: ");
-    Serial.print(scaled_ADC);
-    Serial.println(" %");
-
-    Serial.print("instrumentNodeReady: ");
-    Serial.println(instrumentNodeReady);
-
-    Serial.print("sensor1Valid: ");
-    Serial.println(sensor1Valid);
-
-    Serial.print("sensor2Valid: ");
-    Serial.println(sensor2Valid);
-
-    Serial.print("sensor3Valid: ");
-    Serial.println(sensor3Valid);
-
-    Serial.print("channel health S1/S2/S3: ");
+    Serial.print(" health=");
     Serial.print((uint16_t)channel1Health.state);
     Serial.print("/");
     Serial.print((uint16_t)channel2Health.state);
     Serial.print("/");
-    Serial.println((uint16_t)channel3Health.state);
+    Serial.print((uint16_t)channel3Health.state);
 
-    Serial.print("recovery count S1/S2/S3: ");
-    Serial.print(channel1Health.recoveryCount);
-    Serial.print("/");
-    Serial.print(channel2Health.recoveryCount);
-    Serial.print("/");
-    Serial.println(channel3Health.recoveryCount);
-
-    Serial.print("agree12/agree13/agree23: ");
-    Serial.print(sensorsAgree12);
-    Serial.print("/");
-    Serial.print(sensorsAgree13);
-    Serial.print("/");
-    Serial.println(sensorsAgree23);
-
-    Serial.print("differences d12/d13/d23: ");
-    Serial.print(sensorDifference12);
-    Serial.print("/");
-    Serial.print(sensorDifference13);
-    Serial.print("/");
-    Serial.println(sensorDifference23);
-
-    Serial.print("diagnosticStatus: ");
-    Serial.println(diagnosticStatusToString());
-
-    Serial.print("sensor1Stuck: ");
-    Serial.println(sensor1Stuck);
-
-    Serial.print("sensor2Stuck: ");
-    Serial.println(sensor2Stuck);
-
-    Serial.print("sensor3Stuck: ");
-    Serial.println(sensor3Stuck);
-
-    Serial.print("votingStatus: ");
-    Serial.println((uint16_t)votingStatus);
-
-    Serial.print("disagreementPending: ");
-    Serial.println(disagreementPending);
-
-    Serial.print("disagreementBadCount: ");
-    Serial.println(disagreementBadCount);
-
-    Serial.print("disagreementGoodCount: ");
-    Serial.println(disagreementGoodCount);
-
-    Serial.print("sensorDisagreementConfirmed: ");
-    Serial.println(sensorDisagreementConfirmed);
-
-    Serial.print("diagnosticTempCandidateValid: ");
-    Serial.println(diagnosticTempCandidateValid);
-
-    Serial.print("diagnosticTempCandidate: ");
-    Serial.println(diagnosticTempCandidate);
-
-    Serial.print("ESP32 heartbeat: ");
+    Serial.print(" heartbeat=");
     Serial.println(esp32Heartbeat);
+}
 
-    Serial.println("--------------------");
+void setup() {
+    Serial.begin(115200);
+    delay(1000);
+
+    sensor1.begin();
+    sensor2.begin();
+    sensor3.begin();
+
+    sensor1.setWaitForConversion(false);
+    sensor2.setWaitForConversion(false);
+    sensor3.setWaitForConversion(false);
+
+    connectWiFi();
+
+    mb.server();
+
+    mb.addIreg(IR_TEMP1, MODBUS_INVALID_VALUE);
+    mb.addIreg(IR_TEMP2, MODBUS_INVALID_VALUE);
+    mb.addIreg(IR_TEMP3, MODBUS_INVALID_VALUE);
+    mb.addIreg(IR_ESP32_HEARTBEAT, 0);
+    mb.addIreg(IR_SENSOR1_HEALTH, CHANNEL_NOT_READY);
+    mb.addIreg(IR_SENSOR2_HEALTH, CHANNEL_NOT_READY);
+    mb.addIreg(IR_SENSOR3_HEALTH, CHANNEL_NOT_READY);
+
+    mb.addHreg(HR_FAULT_MODE, NONE);
+
+    Serial.println("Virtual v2: three-channel DS18B20 acquisition/diagnostic node");
 }
 
 void loop() {
@@ -1663,65 +777,33 @@ void loop() {
 
     unsigned long currentTime = millis();
 
-#if ENABLE_PHYSICAL_HEATER_OUTPUT
-    readPhysicalOutputCommand();
-    checkPhysicalPLCHeartbeat(currentTime);
-    updatePhysicalHeaterOutput();
-#else
-    // The active Wokwi/PLCSIM build never drives a simulated plant output.
-    digitalWrite(LED_PIN, LOW);
-#endif
-
-    updateModbusDiscreteInputs();
-
     if (
         !temperatureConversionInProgress &&
-        currentTime - lastSampleTime
-            >= SAMPLE_INTERVAL
+        currentTime - lastSampleTime >= SAMPLE_INTERVAL_MS
     ) {
         lastSampleTime = currentTime;
-
-        startTemperatureConversion(
-            currentTime
-        );
+        startTemperatureConversion(currentTime);
     }
 
     if (
         temperatureConversionInProgress &&
-        currentTime - temperatureRequestTime
-            >= TEMP_CONVERSION_TIME
+        currentTime - temperatureRequestTime >= TEMP_CONVERSION_TIME_MS
     ) {
-        // Select before acquisition so stale test modes can suppress the
-        // normal channel refresh without assigning diagnostic state.
+        // Read the test selector before acquisition so stale-injection modes can
+        // suppress the normal refresh event without directly assigning health.
         selectFaultMode();
 
-        finishInputRead(currentTime);
-
+        finishTemperatureRead(currentTime);
         applyFaultInjection();
 
-        filterInputs();
+        updateChannelHealth(channel1Health, temperature1, currentTime);
+        updateChannelHealth(channel2Health, temperature2, currentTime);
+        updateChannelHealth(channel3Health, temperature3, currentTime);
 
-        ADCscaling();
-
-        runDiagnostics(currentTime);
-
+        evaluateStuckRecovery();
         detectStuckSensors();
 
-        updateDiagnosticsStatus();
-
-        updateDiagnosticTemperatureCandidate();
-        instrumentNodeReady = true;
-
-#if ENABLE_PHYSICAL_HEATER_OUTPUT
-        updatePhysicalHeaterOutput();
-#endif
-
-        updateModbusInputRegisters();
-
-        updateModbusDiscreteInputs();
-
-        logMeasurements(
-            currentTime
-        );
+        publishModbusData();
+        logCycle(currentTime);
     }
 }

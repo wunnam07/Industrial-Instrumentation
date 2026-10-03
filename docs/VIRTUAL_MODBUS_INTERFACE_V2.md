@@ -1,6 +1,9 @@
 # Virtual Modbus Interface v2
 
+**Status: FROZEN — final virtual implementation baseline (3 October 2026).**
+
 This contract defines the clean Modbus TCP interface for the final virtual project.
+The final TIA Portal project has been saved separately and the seven-register ESP32 → Modbus TCP → S7-1500/PLCSIM Advanced path has been commissioned successfully.
 
 ## Design principle
 
@@ -31,7 +34,7 @@ S7-1500 PLC
 - simulated HEATER_OUTPUT
 ~~~
 
-No virtual-project Modbus point may give the ESP32 authority over process state, trusted temperature, heater demand, permissives, trips, or the final heater output.
+No virtual-project Modbus point gives the ESP32 authority over process state, trusted temperature, heater demand, permissives, trips, or the final heater output.
 
 ## Operational Modbus input-register map
 
@@ -55,7 +58,7 @@ The health value is acquisition-side evidence, not a process-state or voting dec
 
 | Value | State | PLC interpretation |
 |---:|---|---|
-| 0 | HEALTHY | Channel may be considered usable if communication is fresh and the temperature register is not 65535 |
+| 0 | HEALTHY | Channel may be usable if communication is fresh and the raw temperature is valid |
 | 1 | READ_FAILURE | Channel unusable |
 | 2 | OUT_OF_RANGE | Channel unusable |
 | 3 | STALE | Channel unusable |
@@ -63,15 +66,13 @@ The health value is acquisition-side evidence, not a process-state or voting dec
 | 5 | RECOVERING | Channel temporarily unusable until ESP32 recovery qualification completes |
 | 6 | NOT_READY | Channel has not yet completed initial qualification |
 
-If more than one acquisition-side condition exists, the ESP32 shall publish one deterministic dominant health state. Recommended priority is:
+If more than one acquisition-side condition exists, the ESP32 publishes one deterministic dominant health state:
 
 READ_FAILURE > OUT_OF_RANGE > STALE > STUCK > RECOVERING > NOT_READY > HEALTHY.
 
-The exact priority must be implemented once and tested; the PLC must not attempt to reconstruct ESP32 diagnostic state from raw history.
-
 ## Values deliberately removed from the operational interface
 
-The following current/legacy values are not part of Virtual Modbus Interface v2:
+The following legacy values are not part of Virtual Modbus Interface v2:
 
 - ESP32 temperature candidate
 - pairwise temperature-difference registers
@@ -85,15 +86,11 @@ The following current/legacy values are not part of Virtual Modbus Interface v2:
 - physical heater demand coil
 - physical PLC heartbeat holding register
 
-Reasons:
-
-- The PLC already has all three temperatures and therefore owns pairwise agreement, trusted-temperature selection, redundancy classification, process state, trips, permissives and output.
-- Recovery counters are internal acquisition implementation details; the PLC only needs the resulting channel health state.
-- Physical-output objects belong to a future physical project, not the final virtual build.
+The PLC already has all three temperatures and therefore owns pairwise agreement, trusted-temperature selection, redundancy classification, process state, trips, permissives and output. Recovery counters are internal acquisition implementation details, and physical-output objects do not belong to the final virtual build.
 
 ## PLC-side decoded data model
 
-The replacement Process_Data_DB for the virtual project should contain only external data that crosses the ESP32/PLC boundary plus decoded validity flags:
+The final `Process_Data_DB` external-data model is limited to:
 
 ~~~text
 Temp1_C : Real
@@ -111,21 +108,23 @@ Sensor2_Health : UInt
 Sensor3_Health : UInt
 ~~~
 
-Recommended validity rule:
+The frozen decoder preserves the verified baseline meaning of raw validity:
 
 ~~~text
-TempN_Valid = (raw TempN <> 16#FFFF) AND (SensorN_Health = HEALTHY)
+TempN_Valid = (raw TempN <> 16#FFFF)
 ~~~
 
-Communication freshness remains a separate PLC responsibility through Heartbeat_Watchdog. A channel is therefore usable only when:
+Health and communication freshness remain separate evidence. Final channel usability is therefore evaluated downstream using all three conditions:
 
 ~~~text
-CommsOK AND TempN_Valid
+CommsOK AND TempN_Valid AND (SensorN_Health = HEALTHY)
 ~~~
+
+This separation is intentional: raw-value validity, acquisition diagnostics, and communication freshness are distinct concepts.
 
 ## PLC logic retained after the interface refactor
 
-The following downstream PLC responsibilities remain conceptually unchanged and should not be rewritten unless compilation/testing proves an interface dependency:
+The verified downstream PLC responsibilities remain unchanged:
 
 1. Heartbeat_Watchdog
 2. Trusted_Temperature_Selector
@@ -135,52 +134,40 @@ The following downstream PLC responsibilities remain conceptually unchanged and 
 6. Heater_Demand_Hysteresis
 7. Calculate_Heater_Output
 
-Only their input wiring should be adjusted where Process_Data_DB fields change.
+Only the Modbus receive/decode boundary changed from the legacy 19-register interface to the final seven-register interface.
 
 ## Test/commissioning interface
 
-Fault injection remains useful for virtual FAT but is not part of the operational interface.
-
-For the virtual test build, reserve one test-only holding register:
+Fault injection remains available for commissioning but is not part of the operational interface.
 
 | Address | Name | Purpose |
 |---:|---|---|
-| 0 | FAULT_MODE | Select controlled firmware fault-injection scenario |
+| HR0 | FAULT_MODE | Select controlled firmware fault-injection scenario |
 
-This holding register shall be clearly documented as commissioning/test only. The PLC control program does not depend on it during normal operation.
+The PLC control program does not depend on `FAULT_MODE` during normal operation. No coils are required by the virtual project.
 
-No coils are required by the virtual project.
+## Final commissioning state
 
-## Future physical project
+The final virtual integration was commissioned with:
 
-The physical extension should start from the clean measurement interface above and add a separate PLC-to-ESP32 output command contract. The virtual project must not carry dormant physical-output objects.
+- Wokwi/ESP32 firmware running
+- local Modbus test client successfully reading the seven-register server
+- S7-PLCSIM Advanced running the saved TIA Portal project
+- `MB_DATA_LEN = 7`
+- receive buffer `Modbus_Data_DB.inputRegisters[0..6]`
+- decoded temperatures, heartbeat and health values flowing into the PLC
+- existing downstream verified control logic retained
 
-A future physical extension may add, for example:
+During final commissioning, the PLC raw Modbus buffer initially did not update because only the software had been downloaded. Downloading both the TIA hardware/device configuration and software restored the working Modbus path. This is retained as a commissioning lesson: a successful software compile/download does not prove that the simulated CPU is running the current hardware/network configuration.
 
-- final PLC HEATER_OUTPUT_CMD
-- PLC heartbeat/freshness command
-- hardware-output execution status
+## Final safety invariant
 
-The PLC must still own trusted temperature, process state, trips, permissives, demand and final output authority. The ESP32 physical-output role is execution plus stale-command fail-safe shutdown.
+The final simulated output authority remains:
 
-## Migration acceptance criteria
+~~~text
+HEATER_OUTPUT = HEATER_DEMAND AND HEATER_PERMISSIVE
+~~~
 
-The v2 interface is accepted only after all of the following are demonstrated:
+## Freeze rule
 
-- normal three-sensor acquisition
-- one-sensor failure and recovery
-- out-of-range channel
-- stale channel
-- stuck-channel diagnostic
-- sensor disagreement handled by PLC logic
-- communication loss and recovery
-- trusted-temperature selection
-- temperature-quality classification
-- warning entry/clear
-- high-temperature trip
-- reset acceptance/rejection
-- heater permissive behavior
-- hysteresis demand behavior
-- final invariant: HEATER_OUTPUT = HEATER_DEMAND AND HEATER_PERMISSIVE
-
-After the tests pass, the virtual firmware, PLC decode SCL, I/O & Interface List, Modbus map and final documentation must all reference this same v2 contract.
+This v2 contract is now the frozen final virtual baseline. Further changes to register meanings, addresses, ownership boundaries, PLC execution order, diagnostic semantics or heater authority require an explicit new revision rather than silent edits to v2.

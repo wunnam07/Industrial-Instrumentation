@@ -35,6 +35,7 @@ class Settings:
     disturbance_at_s: float = 1200.0
     total_time_s: float = 3600.0
     dt_s: float = 0.1
+    controller_sample_s: float | None = None  # None means evaluate every dt_s
 
     @property
     def tau_s(self) -> float:
@@ -48,6 +49,12 @@ class Settings:
             raise ValueError("The ON threshold must be below the OFF threshold.")
         if not 0 < self.disturbance_at_s < self.total_time_s:
             raise ValueError("Disturbance must occur strictly within the simulation.")
+        sample_s = self.dt_s if self.controller_sample_s is None else self.controller_sample_s
+        sample_steps = round(sample_s / self.dt_s)
+        if (sample_s < self.dt_s or
+                not math.isclose(sample_steps * self.dt_s, sample_s,
+                                 rel_tol=0.0, abs_tol=1e-8)):
+            raise ValueError("Controller sample time must be >= dt and a whole multiple of dt.")
         for value, name in ((self.total_time_s, "total_time_s"),
                             (self.disturbance_at_s, "disturbance_at_s")):
             count = round(value / self.dt_s)
@@ -89,13 +96,17 @@ def simulate(settings: Settings) -> Simulation:
     rate = np.empty(n, dtype=float)
     temp[0] = settings.initial_temperature_c
     heater_state = 0
+    sample_s = settings.dt_s if settings.controller_sample_s is None else settings.controller_sample_s
+    sample_steps = round(sample_s / settings.dt_s)
 
     for k in range(n):
-        # Controller sees T[k]; within the deadband it holds its previous state.
-        if temp[k] <= settings.heater_on_c:
-            heater_state = 1
-        elif temp[k] >= settings.heater_off_c:
-            heater_state = 0
+        # The controller only reads temperature at sampling instants.
+        # Between those instants, its last heater command is held.
+        if k % sample_steps == 0:
+            if temp[k] <= settings.heater_on_c:
+                heater_state = 1
+            elif temp[k] >= settings.heater_off_c:
+                heater_state = 0
         heater[k] = heater_state
 
         # The ambient step changes the slope, not the stored temperature.
@@ -194,7 +205,10 @@ def analyze(settings: Settings, result: Simulation) -> dict:
 
     return {
         "settings": asdict(settings),
-        "numerical_method": "Forward Euler; hysteresis evaluated each dt",
+        "numerical_method": (
+            "Forward Euler; sampled hysteresis with held heater output; "
+            f"controller sample time = {settings.dt_s if settings.controller_sample_s is None else settings.controller_sample_s:g} s"
+        ),
         "analytic_before": exact_cycle(settings, settings.ambient_before_c),
         "analytic_after": exact_cycle(settings, settings.ambient_after_c),
         "simulated_before": measured_pre,
@@ -264,6 +278,8 @@ def save_outputs(settings: Settings, result: Simulation, report: dict,
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dt", type=float, default=0.1, help="Euler timestep in seconds")
+    parser.add_argument("--controller-sample", type=float, default=None,
+                        help="Controller sampling interval in seconds (default: same as --dt)")
     parser.add_argument("--disturbance-at", type=float, default=1200.0,
                         help="Time of ambient step in seconds")
     parser.add_argument("--duration", type=float, default=3600.0,
@@ -274,7 +290,8 @@ def main() -> None:
                         help="Ambient after the step (°C)")
     parser.add_argument("--output-dir", type=Path, default=Path("results"))
     args = parser.parse_args()
-    settings = Settings(dt_s=args.dt, disturbance_at_s=args.disturbance_at,
+    settings = Settings(dt_s=args.dt, controller_sample_s=args.controller_sample,
+                        disturbance_at_s=args.disturbance_at,
                         total_time_s=args.duration,
                         ambient_before_c=args.before, ambient_after_c=args.after)
     result = simulate(settings)

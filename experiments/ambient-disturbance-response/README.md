@@ -132,3 +132,43 @@ A lower ambient increases losses, so heating takes longer, cooling is faster and
 ## Project roadmap
 
 Current **CORE** task: disturbance-response analysis. Not included in this experiment: separate controller sampling-time study, systematic variation of `C/H/P`, PLC/ESP32 end-to-end plant integration, or physical validation.
+
+
+## Controller sampling-time experiment (Section E)
+
+The original ambient-disturbance simulation remains backward compatible: by default, the
+controller is evaluated once per Euler step (`controller_sample_s=None`).
+You can now set a **separate controller sampling interval** while keeping the
+physical integration timestep fixed. Between measurements, the heater command
+is held constant (zero-order hold). No sensor noise or latency is modelled.
+
+Run the nominal steady-ambient comparison (25°C throughout):
+
+```bash
+python controller_sampling_study.py
+python -m pytest -q
+```
+
+The study keeps `dt_s=0.1 s` and varies `controller_sample_s` over
+0.1, 1, 5, 10, and 20 s. It reports minimum and maximum temperatures,
+mean complete-cycle period, cycles/hour, and duty cycle over the **last
+10 complete OFF-to-OFF cycles**. Generated artifacts in `sampling_results/`:
+
+- `controller_sampling_metrics.csv`
+- `controller_sampling_metrics.png`
+- `controller_sampling_response.png`
+
+You can also rerun the earlier ambient-disturbance model with a slower controller
+while leaving integration unchanged:
+
+```bash
+python thermal_disturbance.py --dt 0.1 --controller-sample 10 --output-dir results_sample10
+```
+
+**Interpretation:** Slower controller measurements can allow the heater to
+continue operating after the 42°C threshold is crossed, or remain OFF after
+falling below 38°C. Threshold excursions depend on cycle phase, so results
+need not worsen monotonically for *every* increase in sample interval.
+The illustrative 30 cycles/hour constraint must also be checked. The study
+uses ideal measurements and an instantaneous heater: simulated safety margins
+are not guarantees for a real plant.
